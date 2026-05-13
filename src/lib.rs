@@ -666,8 +666,8 @@ impl ChatMessage {
 }
 
 pub struct Session {
-    model: Model,
     context: Context,
+    model: Model,
 }
 
 impl Session {
@@ -689,7 +689,7 @@ impl Session {
         context_params.pooling_type = options.pooling_type;
         let context = Context::new(&model, context_params)?;
 
-        Ok(Self { model, context })
+        Ok(Self { context, model })
     }
 
     pub fn model(&self) -> &Model {
@@ -886,14 +886,7 @@ impl Session {
     ) -> Result<()> {
         let n_tokens = i32::try_from(tokens.len()).map_err(|_| Error::InvalidInput)?;
         let mut batch = Batch::new(n_tokens, 0, 1);
-        let mut seq_storage = vec![[0_i32]; tokens.len()];
-        fill_batch(
-            &mut batch,
-            tokens,
-            start_pos,
-            output_last_only,
-            &mut seq_storage,
-        );
+        fill_batch(&mut batch, tokens, start_pos, output_last_only);
 
         let status = if self.model.has_encoder() && !self.model.has_decoder() {
             self.context.encode(&batch)
@@ -961,7 +954,6 @@ fn fill_batch(
     tokens: &[raw::llama_token],
     start_pos: raw::llama_pos,
     output_last_only: bool,
-    seq_storage: &mut [[raw::llama_seq_id; 1]],
 ) {
     let raw = batch.as_raw_mut();
     raw.n_tokens = tokens.len() as i32;
@@ -970,7 +962,7 @@ fn fill_batch(
             *raw.token.add(index) = token;
             *raw.pos.add(index) = start_pos + index as raw::llama_pos;
             *raw.n_seq_id.add(index) = 1;
-            *raw.seq_id.add(index) = seq_storage[index].as_mut_ptr();
+            **raw.seq_id.add(index) = 0;
             *raw.logits.add(index) = if !output_last_only || index + 1 == tokens.len() {
                 1
             } else {

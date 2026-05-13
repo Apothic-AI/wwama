@@ -19,7 +19,8 @@ fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS is set by cargo");
     let enable_webgpu = env::var_os("CARGO_FEATURE_WEBGPU").is_some();
 
-    let dst = if target.starts_with("wasm32") || target.starts_with("wasm64") {
+    let is_wasm = target.starts_with("wasm32") || target.starts_with("wasm64");
+    let dst = if is_wasm {
         build_wasm(&llama_dir, &target_arch, enable_webgpu)
     } else {
         let mut cfg = cmake::Config::new(&llama_dir);
@@ -34,6 +35,7 @@ fn main() {
         cfg.define("GGML_WEBGPU", "OFF");
         cfg.build()
     };
+    let native_openmp_enabled = !is_wasm && cmake_cache_bool(&dst, "GGML_OPENMP_ENABLED");
     let lib_dir = dst.join("lib");
     assert!(
         lib_dir.exists(),
@@ -57,12 +59,32 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib=dl");
             println!("cargo:rustc-link-lib=dylib=m");
             println!("cargo:rustc-link-lib=dylib=pthread");
+            if native_openmp_enabled {
+                println!("cargo:rustc-link-lib=dylib=gomp");
+            }
         }
         "macos" | "ios" => {
             println!("cargo:rustc-link-lib=dylib=c++");
+            if native_openmp_enabled {
+                println!("cargo:rustc-link-lib=dylib=omp");
+            }
         }
         _ => {}
     }
+}
+
+fn cmake_cache_bool(install_dir: &Path, key: &str) -> bool {
+    let cache_path = install_dir.join("build/CMakeCache.txt");
+    let Ok(cache) = std::fs::read_to_string(cache_path) else {
+        return false;
+    };
+    let prefix = format!("{key}:");
+    cache.lines().any(|line| {
+        line.starts_with(&prefix)
+            && line
+                .split_once('=')
+                .is_some_and(|(_, value)| matches!(value, "ON" | "TRUE" | "1"))
+    })
 }
 
 fn build_wasm(llama_dir: &Path, target_arch: &str, enable_webgpu: bool) -> PathBuf {
