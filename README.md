@@ -1,6 +1,6 @@
 # wwama
 
-`wwama` is a small Rust wrapper crate around a local `llama.cpp` checkout. It is intended to make the `llama.cpp` C API available to Rust code on native targets and browser-oriented WebAssembly targets, including `wasm32-unknown-unknown` and future `wasm64-unknown-unknown` builds.
+`wwama` is a small Rust wrapper crate around a local `llama.cpp` checkout. It is intended to make the `llama.cpp` C API available to Rust code on native targets and browser-oriented WebAssembly targets, including both `wasm32-unknown-unknown` and `wasm64-unknown-unknown`.
 
 The crate currently focuses on the lower-level pieces needed for embedding inference work:
 
@@ -40,7 +40,7 @@ Native builds require:
 
 WebAssembly builds require:
 
-- `wasm32-unknown-unknown` Rust target for wasm32 builds;
+- the `wasm32-unknown-unknown` Rust target for wasm32 builds;
 - `rust-src` plus `cargo -Zbuild-std=core` for wasm64 builds;
 - Emscripten SDK for building the `llama.cpp` C/C++ libraries;
 - EMDawnWebGPU when building with the default `webgpu` feature.
