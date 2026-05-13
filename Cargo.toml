@@ -1,0 +1,15 @@
+[package]
+name = "wwama"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+links = "llama"
+
+[dependencies]
+
+[build-dependencies]
+cmake = "0.1.58"
+
+[features]
+default = ["webgpu"]
+webgpu = []
