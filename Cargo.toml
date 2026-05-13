@@ -9,10 +9,12 @@ build = "build.rs"
 links = "llama"
 
 [dependencies]
+libm = "0.2"
 
 [build-dependencies]
 cmake = "0.1.58"
 
 [features]
 default = ["webgpu"]
+std = []
 webgpu = []
