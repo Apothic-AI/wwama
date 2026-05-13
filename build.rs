@@ -124,10 +124,36 @@ fn build_wasm(llama_dir: &Path, target_arch: &str, enable_webgpu: bool) -> PathB
 }
 
 fn find_llama_cpp_dir() -> PathBuf {
-    let dir = env::var_os("WWAMA_LLAMA_CPP_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("../llama.cpp"));
+    if let Some(dir) = env::var_os("WWAMA_LLAMA_CPP_DIR") {
+        return canonicalize_llama_cpp_dir(PathBuf::from(dir));
+    }
 
+    let manifest_dir = PathBuf::from(
+        env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo"),
+    );
+    let candidates = [
+        manifest_dir.join("../../cpp/llama.cpp"),
+        manifest_dir.join("../llama.cpp"),
+    ];
+
+    for candidate in &candidates {
+        if candidate.join("CMakeLists.txt").exists() && candidate.join("include/llama.h").exists() {
+            return canonicalize_llama_cpp_dir(candidate.clone());
+        }
+    }
+
+    let checked = candidates
+        .iter()
+        .map(|candidate| candidate.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    panic!(
+        "failed to locate llama.cpp; set WWAMA_LLAMA_CPP_DIR or use one of these layouts: {checked}"
+    );
+}
+
+fn canonicalize_llama_cpp_dir(dir: PathBuf) -> PathBuf {
     dir.canonicalize()
         .unwrap_or_else(|err| panic!("failed to resolve llama.cpp dir {}: {err}", dir.display()))
 }
