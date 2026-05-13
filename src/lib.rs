@@ -668,6 +668,7 @@ impl ChatMessage {
 pub struct Session {
     context: Context,
     model: Model,
+    n_batch: usize,
 }
 
 impl Session {
@@ -689,7 +690,11 @@ impl Session {
         context_params.pooling_type = options.pooling_type;
         let context = Context::new(&model, context_params)?;
 
-        Ok(Self { context, model })
+        Ok(Self {
+            context,
+            model,
+            n_batch: options.n_batch.max(1) as usize,
+        })
     }
 
     pub fn model(&self) -> &Model {
@@ -823,6 +828,7 @@ impl Session {
             return Err(Error::InvalidInput);
         }
 
+        self.context.set_embeddings(false);
         self.context.clear_memory(true);
         self.evaluate_tokens(&prompt_tokens, 0, true)?;
 
@@ -856,7 +862,7 @@ impl Session {
 
         self.context.set_embeddings(true);
         self.context.clear_memory(true);
-        self.evaluate_tokens(&tokens, 0, true)?;
+        self.evaluate_tokens(&tokens, 0, false)?;
         self.context.synchronize();
 
         let dim = self.model.n_embd_out();
@@ -884,22 +890,26 @@ impl Session {
         start_pos: raw::llama_pos,
         output_last_only: bool,
     ) -> Result<()> {
-        let n_tokens = i32::try_from(tokens.len()).map_err(|_| Error::InvalidInput)?;
-        let mut batch = Batch::new(n_tokens, 0, 1);
-        fill_batch(&mut batch, tokens, start_pos, output_last_only);
+        for (chunk_index, chunk) in tokens.chunks(self.n_batch).enumerate() {
+            let n_tokens = i32::try_from(chunk.len()).map_err(|_| Error::InvalidInput)?;
+            let chunk_start_pos = start_pos + (chunk_index * self.n_batch) as raw::llama_pos;
+            let mut batch = Batch::new(n_tokens, 0, 1);
+            fill_batch(&mut batch, chunk, chunk_start_pos, output_last_only);
 
-        let status = if self.model.has_encoder() && !self.model.has_decoder() {
-            self.context.encode(&batch)
-        } else {
-            self.context.decode(&batch)
-        };
-        match status {
-            0 => Ok(()),
-            code if self.model.has_encoder() && !self.model.has_decoder() => {
-                Err(Error::EncodeFailed(code))
+            let status = if self.model.has_encoder() && !self.model.has_decoder() {
+                self.context.encode(&batch)
+            } else {
+                self.context.decode(&batch)
+            };
+            match status {
+                0 => {}
+                code if self.model.has_encoder() && !self.model.has_decoder() => {
+                    return Err(Error::EncodeFailed(code));
+                }
+                code => return Err(Error::DecodeFailed(code)),
             }
-            code => Err(Error::DecodeFailed(code)),
         }
+        Ok(())
     }
 }
 
