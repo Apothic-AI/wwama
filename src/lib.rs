@@ -4,14 +4,16 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+use alloc::borrow::ToOwned;
 use alloc::ffi::CString;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ffi::CStr;
 use core::fmt;
 use core::ptr::NonNull;
 use core::slice;
+use core::str;
 
 pub mod raw {
     #![allow(non_camel_case_types)]
@@ -363,6 +365,7 @@ pub enum Error {
     EncodeFailed(i32),
     EmbeddingUnavailable,
     RerankUnavailable,
+    ProjectorInvalid,
 }
 
 impl fmt::Display for Error {
@@ -384,6 +387,7 @@ impl fmt::Display for Error {
             Self::RerankUnavailable => f.write_str(
                 "llama.cpp reranking requires embeddings enabled with rank pooling",
             ),
+            Self::ProjectorInvalid => f.write_str("invalid rerank projector"),
         }
     }
 }
@@ -732,6 +736,82 @@ pub struct RerankOutput {
 }
 
 #[derive(Clone, Debug)]
+pub struct JinaRerankProjector {
+    linear1_weight: Vec<f32>,
+    linear1_out: usize,
+    linear1_in: usize,
+    linear2_weight: Vec<f32>,
+    linear2_out: usize,
+    linear2_in: usize,
+}
+
+impl JinaRerankProjector {
+    pub fn from_safetensors(bytes: &[u8]) -> Result<Self> {
+        let (linear1_shape, linear1_weight) = read_safetensor_f32(bytes, "projector.0.weight")?;
+        let (linear2_shape, linear2_weight) = read_safetensor_f32(bytes, "projector.2.weight")?;
+        if linear1_shape.len() != 2 || linear2_shape.len() != 2 {
+            return Err(Error::ProjectorInvalid);
+        }
+        let linear1_out = linear1_shape[0];
+        let linear1_in = linear1_shape[1];
+        let linear2_out = linear2_shape[0];
+        let linear2_in = linear2_shape[1];
+        if linear1_out == 0
+            || linear1_in == 0
+            || linear2_out == 0
+            || linear2_in == 0
+            || linear1_weight.len() != linear1_out.saturating_mul(linear1_in)
+            || linear2_weight.len() != linear2_out.saturating_mul(linear2_in)
+            || linear2_in != linear1_out
+        {
+            return Err(Error::ProjectorInvalid);
+        }
+        Ok(Self {
+            linear1_weight,
+            linear1_out,
+            linear1_in,
+            linear2_weight,
+            linear2_out,
+            linear2_in,
+        })
+    }
+
+    pub fn input_dim(&self) -> usize {
+        self.linear1_in
+    }
+
+    pub fn output_dim(&self) -> usize {
+        self.linear2_out
+    }
+
+    pub fn project(&self, input: &[f32]) -> Result<Vec<f32>> {
+        if input.len() != self.linear1_in {
+            return Err(Error::ProjectorInvalid);
+        }
+        let mut hidden = vec![0.0_f32; self.linear1_out];
+        for row in 0..self.linear1_out {
+            let weight_offset = row * self.linear1_in;
+            let mut sum = 0.0_f32;
+            for col in 0..self.linear1_in {
+                sum += input[col] * self.linear1_weight[weight_offset + col];
+            }
+            hidden[row] = sum.max(0.0);
+        }
+
+        let mut output = vec![0.0_f32; self.linear2_out];
+        for row in 0..self.linear2_out {
+            let weight_offset = row * self.linear2_in;
+            let mut sum = 0.0_f32;
+            for col in 0..self.linear2_in {
+                sum += hidden[col] * self.linear2_weight[weight_offset + col];
+            }
+            output[row] = sum;
+        }
+        Ok(output)
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -998,6 +1078,59 @@ impl Session {
         Ok(outputs)
     }
 
+    pub fn rerank_documents_jina_v3(
+        &mut self,
+        query: &str,
+        documents: &[String],
+        projector: &JinaRerankProjector,
+        options: &RerankOptions,
+    ) -> Result<Vec<RerankOutput>> {
+        if self.context.pooling_type() != raw::llama_pooling_type::None {
+            return Err(Error::RerankUnavailable);
+        }
+        if query.trim().is_empty() || documents.is_empty() {
+            return Err(Error::InvalidInput);
+        }
+
+        let prompt = jina_v3_rerank_prompt(query, documents, options.instruction.as_deref());
+        let tokens = self.tokenize_text(&prompt, options.add_special, true)?;
+        if tokens.is_empty() || tokens.len() > self.context.n_ctx() as usize {
+            return Err(Error::InvalidInput);
+        }
+
+        let query_positions = token_positions(&tokens, JINA_V3_QUERY_EMBED_TOKEN_ID);
+        let document_positions = token_positions(&tokens, JINA_V3_DOC_EMBED_TOKEN_ID);
+        if query_positions.is_empty() || document_positions.len() != documents.len() {
+            return Err(Error::RerankUnavailable);
+        }
+
+        let hidden_states = self.embed_tokens_unpooled(&tokens)?;
+        let query_hidden = hidden_states
+            .get(query_positions[0])
+            .ok_or(Error::EmbeddingUnavailable)?;
+        let query_embedding = projector.project(query_hidden)?;
+
+        let mut outputs = Vec::with_capacity(documents.len());
+        for (index, position) in document_positions.iter().copied().enumerate() {
+            let document_hidden = hidden_states
+                .get(position)
+                .ok_or(Error::EmbeddingUnavailable)?;
+            let document_embedding = projector.project(document_hidden)?;
+            outputs.push(RerankOutput {
+                index,
+                score: cosine_similarity(&query_embedding, &document_embedding),
+                rank: 0,
+                token_count: tokens.len(),
+            });
+        }
+
+        outputs.sort_by(|left, right| right.score.total_cmp(&left.score));
+        for (rank, output) in outputs.iter_mut().enumerate() {
+            output.rank = rank;
+        }
+        Ok(outputs)
+    }
+
     pub fn rerank_score(
         &mut self,
         query: &str,
@@ -1089,6 +1222,49 @@ impl Session {
         Ok(tokens)
     }
 
+    fn embed_tokens_unpooled(&mut self, tokens: &[raw::llama_token]) -> Result<Vec<Vec<f32>>> {
+        self.context.set_embeddings(true);
+        self.context.clear_memory(true);
+
+        let dim = self.model.n_embd_out();
+        if dim <= 0 {
+            return Err(Error::EmbeddingUnavailable);
+        }
+        let dim = dim as usize;
+        let mut embeddings = Vec::with_capacity(tokens.len());
+
+        for (chunk_index, chunk) in tokens.chunks(self.n_batch).enumerate() {
+            let n_tokens = i32::try_from(chunk.len()).map_err(|_| Error::InvalidInput)?;
+            let chunk_start_pos = (chunk_index * self.n_batch) as raw::llama_pos;
+            let mut batch = Batch::new(n_tokens, 0, 1);
+            fill_batch(&mut batch, chunk, chunk_start_pos, false);
+
+            let status = if self.model.has_encoder() && !self.model.has_decoder() {
+                self.context.encode(&batch)
+            } else {
+                self.context.decode(&batch)
+            };
+            match status {
+                0 => {}
+                code if self.model.has_encoder() && !self.model.has_decoder() => {
+                    return Err(Error::EncodeFailed(code));
+                }
+                code => return Err(Error::DecodeFailed(code)),
+            }
+            self.context.synchronize();
+
+            for index in 0..chunk.len() {
+                let ptr = self.context.embeddings_ith(index as i32);
+                if ptr.is_null() {
+                    return Err(Error::EmbeddingUnavailable);
+                }
+                embeddings.push(unsafe { slice::from_raw_parts(ptr, dim) }.to_vec());
+            }
+        }
+
+        Ok(embeddings)
+    }
+
     fn evaluate_tokens(
         &mut self,
         tokens: &[raw::llama_token],
@@ -1116,6 +1292,69 @@ impl Session {
         }
         Ok(())
     }
+}
+
+const JINA_V3_DOC_EMBED_TOKEN_ID: raw::llama_token = 151_670;
+const JINA_V3_QUERY_EMBED_TOKEN_ID: raw::llama_token = 151_671;
+const JINA_V3_DOC_EMBED_TOKEN: &str = "<|embed_token|>";
+const JINA_V3_QUERY_EMBED_TOKEN: &str = "<|rerank_token|>";
+
+fn jina_v3_rerank_prompt(query: &str, documents: &[String], instruction: Option<&str>) -> String {
+    let special_tokens = [JINA_V3_DOC_EMBED_TOKEN, JINA_V3_QUERY_EMBED_TOKEN];
+    let query = sanitize_jina_v3_input(query, &special_tokens);
+    let mut prompt = String::from(
+        "<|im_start|>system\n\
+You are a search relevance expert who can determine a ranking of the passages based on how relevant they are to the query. \
+If the query is a question, how relevant a passage is depends on how well it answers the question. \
+If not, try to analyze the intent of the query and assess how well each passage satisfies the intent. \
+If an instruction is provided, you should follow the instruction when determining the ranking.\
+<|im_end|>\n<|im_start|>user\n",
+    );
+    prompt.push_str("I will provide you with ");
+    prompt.push_str(&documents.len().to_string());
+    prompt.push_str(" passages, each indicated by a numerical identifier. Rank the passages based on their relevance to query: ");
+    prompt.push_str(&query);
+    prompt.push('\n');
+
+    if let Some(instruction) = instruction.map(str::trim).filter(|value| !value.is_empty()) {
+        prompt.push_str("<instruct>\n");
+        prompt.push_str(&sanitize_jina_v3_input(instruction, &special_tokens));
+        prompt.push_str("\n</instruct>\n");
+    }
+
+    for (index, document) in documents.iter().enumerate() {
+        if index > 0 {
+            prompt.push('\n');
+        }
+        prompt.push_str("<passage id=\"");
+        prompt.push_str(&index.to_string());
+        prompt.push_str("\">\n");
+        prompt.push_str(&sanitize_jina_v3_input(document, &special_tokens));
+        prompt.push_str(JINA_V3_DOC_EMBED_TOKEN);
+        prompt.push_str("\n</passage>");
+    }
+
+    prompt.push_str("\n<query>\n");
+    prompt.push_str(&query);
+    prompt.push_str(JINA_V3_QUERY_EMBED_TOKEN);
+    prompt.push_str("\n</query><|im_end|>\n<|im_start|>assistant\n");
+    prompt
+}
+
+fn sanitize_jina_v3_input(input: &str, special_tokens: &[&str]) -> String {
+    let mut output = input.to_owned();
+    for token in special_tokens {
+        output = output.replace(token, "");
+    }
+    output
+}
+
+fn token_positions(tokens: &[raw::llama_token], needle: raw::llama_token) -> Vec<usize> {
+    tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (*token == needle).then_some(index))
+        .collect()
 }
 
 struct Sampler {
@@ -1193,6 +1432,131 @@ fn push_if_token(tokens: &mut Vec<raw::llama_token>, token: raw::llama_token) {
     }
 }
 
+fn read_safetensor_f32(bytes: &[u8], name: &str) -> Result<(Vec<usize>, Vec<f32>)> {
+    if bytes.len() < 8 {
+        return Err(Error::ProjectorInvalid);
+    }
+    let header_len = u64::from_le_bytes(
+        bytes[0..8]
+            .try_into()
+            .map_err(|_| Error::ProjectorInvalid)?,
+    ) as usize;
+    let header_start = 8_usize;
+    let header_end = header_start
+        .checked_add(header_len)
+        .ok_or(Error::ProjectorInvalid)?;
+    if header_end > bytes.len() {
+        return Err(Error::ProjectorInvalid);
+    }
+    let header =
+        str::from_utf8(&bytes[header_start..header_end]).map_err(|_| Error::ProjectorInvalid)?;
+    let section = safetensor_tensor_section(header, name)?;
+    let dtype = json_string_field(section, "dtype").ok_or(Error::ProjectorInvalid)?;
+    if dtype != "F32" {
+        return Err(Error::ProjectorInvalid);
+    }
+    let shape = json_usize_array_field(section, "shape")?;
+    let offsets = json_usize_array_field(section, "data_offsets")?;
+    if offsets.len() != 2 || shape.is_empty() {
+        return Err(Error::ProjectorInvalid);
+    }
+    let item_count = shape
+        .iter()
+        .try_fold(1_usize, |acc, value| acc.checked_mul(*value))
+        .ok_or(Error::ProjectorInvalid)?;
+    let data_start = header_end
+        .checked_add(offsets[0])
+        .ok_or(Error::ProjectorInvalid)?;
+    let data_end = header_end
+        .checked_add(offsets[1])
+        .ok_or(Error::ProjectorInvalid)?;
+    if data_start > data_end || data_end > bytes.len() || data_end - data_start != item_count * 4 {
+        return Err(Error::ProjectorInvalid);
+    }
+
+    let mut data = Vec::with_capacity(item_count);
+    for chunk in bytes[data_start..data_end].chunks_exact(4) {
+        data.push(f32::from_le_bytes(
+            chunk.try_into().map_err(|_| Error::ProjectorInvalid)?,
+        ));
+    }
+    Ok((shape, data))
+}
+
+fn safetensor_tensor_section<'a>(header: &'a str, name: &str) -> Result<&'a str> {
+    let key = {
+        let mut key = String::from("\"");
+        key.push_str(name);
+        key.push('"');
+        key
+    };
+    let start = header.find(&key).ok_or(Error::ProjectorInvalid)? + key.len();
+    let object_start = header[start..]
+        .find('{')
+        .map(|index| start + index)
+        .ok_or(Error::ProjectorInvalid)?;
+    let mut depth = 0_i32;
+    for (offset, byte) in header.as_bytes()[object_start..].iter().copied().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let end = object_start + offset + 1;
+                    return Ok(&header[object_start..end]);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(Error::ProjectorInvalid)
+}
+
+fn json_string_field<'a>(section: &'a str, field: &str) -> Option<&'a str> {
+    let key = {
+        let mut key = String::from("\"");
+        key.push_str(field);
+        key.push('"');
+        key
+    };
+    let key_start = section.find(&key)? + key.len();
+    let colon = section[key_start..].find(':').map(|index| key_start + index)?;
+    let value_start = section[colon + 1..]
+        .find('"')
+        .map(|index| colon + 1 + index + 1)?;
+    let value_end = section[value_start..]
+        .find('"')
+        .map(|index| value_start + index)?;
+    Some(&section[value_start..value_end])
+}
+
+fn json_usize_array_field(section: &str, field: &str) -> Result<Vec<usize>> {
+    let key = {
+        let mut key = String::from("\"");
+        key.push_str(field);
+        key.push('"');
+        key
+    };
+    let key_start = section.find(&key).ok_or(Error::ProjectorInvalid)? + key.len();
+    let array_start = section[key_start..]
+        .find('[')
+        .map(|index| key_start + index + 1)
+        .ok_or(Error::ProjectorInvalid)?;
+    let array_end = section[array_start..]
+        .find(']')
+        .map(|index| array_start + index)
+        .ok_or(Error::ProjectorInvalid)?;
+    let mut values = Vec::new();
+    for part in section[array_start..array_end].split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        values.push(part.parse().map_err(|_| Error::ProjectorInvalid)?);
+    }
+    Ok(values)
+}
+
 pub fn apply_chat_template(
     template: Option<&str>,
     messages: &[ChatMessage],
@@ -1254,5 +1618,25 @@ fn normalize_l2(vector: &mut [f32]) {
         for value in vector {
             *value /= norm;
         }
+    }
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() || left.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0_f32;
+    let mut left_norm = 0.0_f32;
+    let mut right_norm = 0.0_f32;
+    for (left_value, right_value) in left.iter().zip(right.iter()) {
+        dot += left_value * right_value;
+        left_norm += left_value * left_value;
+        right_norm += right_value * right_value;
+    }
+    let denom = libm::sqrtf(left_norm) * libm::sqrtf(right_norm);
+    if denom > 0.0 && denom.is_finite() {
+        dot / denom
+    } else {
+        0.0
     }
 }
