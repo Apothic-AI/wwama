@@ -19,6 +19,7 @@ pub mod raw {
     use core::ffi::{c_char, c_float, c_void};
 
     pub const LLAMA_DEFAULT_SEED: u32 = 0xFFFF_FFFF;
+    pub const LLAMA_TOKEN_NULL: llama_token = -1;
 
     pub enum llama_vocab {}
     pub enum llama_model {}
@@ -249,10 +250,20 @@ pub mod raw {
         pub fn llama_model_has_encoder(model: *const llama_model) -> bool;
         pub fn llama_model_has_decoder(model: *const llama_model) -> bool;
         pub fn llama_model_n_embd_out(model: *const llama_model) -> i32;
+        pub fn llama_model_n_cls_out(model: *const llama_model) -> u32;
+        pub fn llama_model_cls_label(model: *const llama_model, i: u32) -> *const c_char;
+        pub fn llama_model_chat_template(
+            model: *const llama_model,
+            name: *const c_char,
+        ) -> *const c_char;
         pub fn llama_vocab_n_tokens(vocab: *const llama_vocab) -> i32;
         pub fn llama_vocab_is_eog(vocab: *const llama_vocab, token: llama_token) -> bool;
+        pub fn llama_vocab_bos(vocab: *const llama_vocab) -> llama_token;
+        pub fn llama_vocab_eos(vocab: *const llama_vocab) -> llama_token;
+        pub fn llama_vocab_sep(vocab: *const llama_vocab) -> llama_token;
         pub fn llama_vocab_get_add_bos(vocab: *const llama_vocab) -> bool;
         pub fn llama_vocab_get_add_eos(vocab: *const llama_vocab) -> bool;
+        pub fn llama_vocab_get_add_sep(vocab: *const llama_vocab) -> bool;
 
         pub fn llama_pooling_type(ctx: *const llama_context) -> llama_pooling_type;
         pub fn llama_set_embeddings(ctx: *mut llama_context, embeddings: bool);
@@ -330,7 +341,7 @@ pub mod raw {
 }
 
 pub use raw::{
-    LLAMA_DEFAULT_SEED, ggml_type, llama_attention_type, llama_batch, llama_chat_message,
+    LLAMA_DEFAULT_SEED, LLAMA_TOKEN_NULL, ggml_type, llama_attention_type, llama_batch, llama_chat_message,
     llama_context_params, llama_flash_attn_type, llama_model_params, llama_pooling_type, llama_pos,
     llama_rope_scaling_type, llama_sampler_chain_params, llama_seq_id, llama_split_mode,
     llama_token,
@@ -351,6 +362,7 @@ pub enum Error {
     DecodeFailed(i32),
     EncodeFailed(i32),
     EmbeddingUnavailable,
+    RerankUnavailable,
 }
 
 impl fmt::Display for Error {
@@ -369,6 +381,9 @@ impl fmt::Display for Error {
             Self::EmbeddingUnavailable => {
                 f.write_str("llama.cpp did not return an embedding vector")
             }
+            Self::RerankUnavailable => f.write_str(
+                "llama.cpp reranking requires embeddings enabled with rank pooling",
+            ),
         }
     }
 }
@@ -429,8 +444,43 @@ impl Model {
         unsafe { raw::llama_model_n_embd_out(self.ptr.as_ptr()) }
     }
 
+    pub fn n_cls_out(&self) -> u32 {
+        unsafe { raw::llama_model_n_cls_out(self.ptr.as_ptr()) }
+    }
+
+    pub fn cls_label(&self, index: u32) -> Option<String> {
+        let ptr = unsafe { raw::llama_model_cls_label(self.ptr.as_ptr(), index) };
+        if ptr.is_null() {
+            return None;
+        }
+        Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
+    }
+
+    pub fn chat_template(&self, name: &str) -> Result<Option<String>> {
+        let name = CString::new(name).map_err(|_| Error::InvalidCString)?;
+        let ptr = unsafe { raw::llama_model_chat_template(self.ptr.as_ptr(), name.as_ptr()) };
+        if ptr.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(
+            unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned(),
+        ))
+    }
+
     pub fn n_vocab(&self) -> i32 {
         unsafe { raw::llama_vocab_n_tokens(self.vocab()) }
+    }
+
+    pub fn bos(&self) -> raw::llama_token {
+        unsafe { raw::llama_vocab_bos(self.vocab()) }
+    }
+
+    pub fn eos(&self) -> raw::llama_token {
+        unsafe { raw::llama_vocab_eos(self.vocab()) }
+    }
+
+    pub fn sep(&self) -> raw::llama_token {
+        unsafe { raw::llama_vocab_sep(self.vocab()) }
     }
 
     pub fn add_bos(&self) -> bool {
@@ -439,6 +489,10 @@ impl Model {
 
     pub fn add_eos(&self) -> bool {
         unsafe { raw::llama_vocab_get_add_eos(self.vocab()) }
+    }
+
+    pub fn add_sep(&self) -> bool {
+        unsafe { raw::llama_vocab_get_add_sep(self.vocab()) }
     }
 
     pub fn is_eog(&self, token: raw::llama_token) -> bool {
@@ -644,9 +698,36 @@ impl Default for EmbeddingOptions {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct RerankOptions {
+    pub instruction: Option<String>,
+    pub prompt_template: Option<String>,
+    pub add_special: bool,
+    pub parse_special: bool,
+}
+
+impl Default for RerankOptions {
+    fn default() -> Self {
+        Self {
+            instruction: None,
+            prompt_template: None,
+            add_special: true,
+            parse_special: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct GenerateOutput {
     pub text: String,
+    pub token_count: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RerankOutput {
+    pub index: usize,
+    pub score: f32,
+    pub rank: usize,
     pub token_count: usize,
 }
 
@@ -884,6 +965,130 @@ impl Session {
         Ok(vector)
     }
 
+    pub fn rerank_documents(
+        &mut self,
+        query: &str,
+        documents: &[String],
+        options: &RerankOptions,
+    ) -> Result<Vec<RerankOutput>> {
+        if self.context.pooling_type() != raw::llama_pooling_type::Rank {
+            return Err(Error::RerankUnavailable);
+        }
+        if query.trim().is_empty() || documents.is_empty() {
+            return Err(Error::InvalidInput);
+        }
+
+        let mut outputs = documents
+            .iter()
+            .enumerate()
+            .map(|(index, document)| {
+                self.rerank_score(query, document, options)
+                    .map(|(score, token_count)| RerankOutput {
+                        index,
+                        score,
+                        rank: 0,
+                        token_count,
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        outputs.sort_by(|left, right| right.score.total_cmp(&left.score));
+        for (rank, output) in outputs.iter_mut().enumerate() {
+            output.rank = rank;
+        }
+        Ok(outputs)
+    }
+
+    pub fn rerank_score(
+        &mut self,
+        query: &str,
+        document: &str,
+        options: &RerankOptions,
+    ) -> Result<(f32, usize)> {
+        let tokens = self.rerank_tokens(query, document, options)?;
+        if tokens.is_empty() {
+            return Err(Error::InvalidInput);
+        }
+
+        self.context.set_embeddings(true);
+        self.context.clear_memory(true);
+        self.evaluate_tokens(&tokens, 0, false)?;
+        self.context.synchronize();
+
+        let dim = self.model.n_embd_out();
+        if dim <= 0 {
+            return Err(Error::RerankUnavailable);
+        }
+        let ptr = self.context.embeddings_seq(0);
+        let ptr = if ptr.is_null() {
+            self.context.embeddings_ith(-1)
+        } else {
+            ptr
+        };
+        if ptr.is_null() {
+            return Err(Error::RerankUnavailable);
+        }
+        Ok((unsafe { *ptr }, tokens.len()))
+    }
+
+    fn rerank_tokens(
+        &self,
+        query: &str,
+        document: &str,
+        options: &RerankOptions,
+    ) -> Result<Vec<raw::llama_token>> {
+        if let Some(prompt) = self.rerank_prompt(query, document, options)? {
+            return self.tokenize_text(&prompt, options.add_special, options.parse_special);
+        }
+        self.rerank_fallback_tokens(query, document, options)
+    }
+
+    fn rerank_prompt(
+        &self,
+        query: &str,
+        document: &str,
+        options: &RerankOptions,
+    ) -> Result<Option<String>> {
+        let template = options
+            .prompt_template
+            .as_deref()
+            .filter(|template| !template.trim().is_empty())
+            .map(String::from)
+            .or(self.model.chat_template("rerank")?);
+        Ok(template.map(|template| {
+            let instruction = options.instruction.as_deref().unwrap_or("");
+            template
+                .replace("{instruction}", instruction)
+                .replace("{query}", query)
+                .replace("{document}", document)
+        }))
+    }
+
+    fn rerank_fallback_tokens(
+        &self,
+        query: &str,
+        document: &str,
+        options: &RerankOptions,
+    ) -> Result<Vec<raw::llama_token>> {
+        let mut tokens = Vec::new();
+        if self.model.add_bos() {
+            push_if_token(&mut tokens, self.model.bos());
+        }
+        tokens.extend(self.tokenize_text(query, false, options.parse_special)?);
+        if self.model.add_eos() {
+            push_if_token(&mut tokens, self.model.eos());
+        }
+        if self.model.add_sep() {
+            push_if_token(&mut tokens, self.model.sep());
+        } else if !self.model.add_eos() {
+            push_if_token(&mut tokens, self.model.eos());
+        }
+        tokens.extend(self.tokenize_text(document, false, options.parse_special)?);
+        if self.model.add_eos() {
+            push_if_token(&mut tokens, self.model.eos());
+        }
+        Ok(tokens)
+    }
+
     fn evaluate_tokens(
         &mut self,
         tokens: &[raw::llama_token],
@@ -979,6 +1184,12 @@ fn fill_batch(
                 0
             };
         }
+    }
+}
+
+fn push_if_token(tokens: &mut Vec<raw::llama_token>, token: raw::llama_token) {
+    if token != raw::LLAMA_TOKEN_NULL {
+        tokens.push(token);
     }
 }
 
