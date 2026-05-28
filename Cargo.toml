@@ -18,3 +18,5 @@ cmake = "0.1.58"
 default = ["webgpu"]
 std = []
 webgpu = []
+cuda = []
+vulkan = []

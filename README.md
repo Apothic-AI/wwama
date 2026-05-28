@@ -86,6 +86,16 @@ Native:
 cargo build
 ```
 
+Native CUDA, when the host has a compatible CUDA toolkit:
+
+```sh
+CUDA_HOME=/usr/local/cuda-13.2 \
+CUDA_PATH=/usr/local/cuda-13.2 \
+CUDAToolkit_ROOT=/usr/local/cuda-13.2 \
+WWAMA_CMAKE_CUDA_ARCHITECTURES=89 \
+cargo build --no-default-features --features "std cuda"
+```
+
 WASM32 with WebGPU, using the default features:
 
 ```sh
@@ -112,8 +122,14 @@ RUSTC_BOOTSTRAP=1 cargo build -Zbuild-std=core,alloc --no-default-features --tar
 ## Features
 
 - `webgpu` is enabled by default. For WebAssembly targets, it enables `GGML_WEBGPU=ON` in the `llama.cpp` CMake build.
+- `cuda` enables the native llama.cpp/ggml CUDA backend. It is intentionally
+  not a default feature.
+- `vulkan` enables the native llama.cpp/ggml Vulkan backend. It is intentionally
+  not a default feature and requires a Vulkan SDK with `glslc`.
 - `std` enables the standard library error trait implementation. The session API itself stays available without `std`.
-- Native builds currently compile the CPU path even when the feature is enabled.
+- Native builds compile the CPU path unless an explicit native GPU backend
+  feature is enabled. At runtime, `n_gpu_layers` controls whether llama.cpp
+  offloads model layers to a compiled GPU backend.
 
 ## License
 

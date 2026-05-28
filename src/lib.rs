@@ -343,10 +343,10 @@ pub mod raw {
 }
 
 pub use raw::{
-    LLAMA_DEFAULT_SEED, LLAMA_TOKEN_NULL, ggml_type, llama_attention_type, llama_batch, llama_chat_message,
-    llama_context_params, llama_flash_attn_type, llama_model_params, llama_pooling_type, llama_pos,
-    llama_rope_scaling_type, llama_sampler_chain_params, llama_seq_id, llama_split_mode,
-    llama_token,
+    LLAMA_DEFAULT_SEED, LLAMA_TOKEN_NULL, ggml_type, llama_attention_type, llama_batch,
+    llama_chat_message, llama_context_params, llama_flash_attn_type, llama_model_params,
+    llama_pooling_type, llama_pos, llama_rope_scaling_type, llama_sampler_chain_params,
+    llama_seq_id, llama_split_mode, llama_token,
 };
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -384,9 +384,9 @@ impl fmt::Display for Error {
             Self::EmbeddingUnavailable => {
                 f.write_str("llama.cpp did not return an embedding vector")
             }
-            Self::RerankUnavailable => f.write_str(
-                "llama.cpp reranking requires embeddings enabled with rank pooling",
-            ),
+            Self::RerankUnavailable => {
+                f.write_str("llama.cpp reranking requires embeddings enabled with rank pooling")
+            }
             Self::ProjectorInvalid => f.write_str("invalid rerank projector"),
         }
     }
@@ -457,7 +457,11 @@ impl Model {
         if ptr.is_null() {
             return None;
         }
-        Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
+        Some(
+            unsafe { CStr::from_ptr(ptr) }
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
 
     pub fn chat_template(&self, name: &str) -> Result<Option<String>> {
@@ -467,7 +471,9 @@ impl Model {
             return Ok(None);
         }
         Ok(Some(
-            unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned(),
+            unsafe { CStr::from_ptr(ptr) }
+                .to_string_lossy()
+                .into_owned(),
         ))
     }
 
@@ -1496,7 +1502,11 @@ fn safetensor_tensor_section<'a>(header: &'a str, name: &str) -> Result<&'a str>
         .map(|index| start + index)
         .ok_or(Error::ProjectorInvalid)?;
     let mut depth = 0_i32;
-    for (offset, byte) in header.as_bytes()[object_start..].iter().copied().enumerate() {
+    for (offset, byte) in header.as_bytes()[object_start..]
+        .iter()
+        .copied()
+        .enumerate()
+    {
         match byte {
             b'{' => depth += 1,
             b'}' => {
@@ -1520,7 +1530,9 @@ fn json_string_field<'a>(section: &'a str, field: &str) -> Option<&'a str> {
         key
     };
     let key_start = section.find(&key)? + key.len();
-    let colon = section[key_start..].find(':').map(|index| key_start + index)?;
+    let colon = section[key_start..]
+        .find(':')
+        .map(|index| key_start + index)?;
     let value_start = section[colon + 1..]
         .find('"')
         .map(|index| colon + 1 + index + 1)?;
