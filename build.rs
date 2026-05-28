@@ -54,13 +54,25 @@ fn main() {
     }
 
     match target_os.as_str() {
-        "linux" | "android" | "freebsd" | "openbsd" | "netbsd" => {
+        "linux" | "freebsd" | "openbsd" | "netbsd" => {
             println!("cargo:rustc-link-lib=dylib=stdc++");
             println!("cargo:rustc-link-lib=dylib=dl");
             println!("cargo:rustc-link-lib=dylib=m");
             println!("cargo:rustc-link-lib=dylib=pthread");
             if native_openmp_enabled {
                 println!("cargo:rustc-link-lib=dylib=gomp");
+            }
+        }
+        "android" => {
+            println!("cargo:rustc-link-lib=dylib=stdc++");
+            println!("cargo:rustc-link-lib=dylib=dl");
+            println!("cargo:rustc-link-lib=dylib=m");
+            println!("cargo:rustc-link-lib=dylib=log");
+            if native_openmp_enabled {
+                if let Some(dir) = android_openmp_lib_dir(&target_arch) {
+                    println!("cargo:rustc-link-search=native={}", dir.display());
+                }
+                println!("cargo:rustc-link-lib=dylib=omp");
             }
         }
         "macos" | "ios" => {
@@ -85,6 +97,33 @@ fn cmake_cache_bool(install_dir: &Path, key: &str) -> bool {
                 .split_once('=')
                 .is_some_and(|(_, value)| matches!(value, "ON" | "TRUE" | "1"))
     })
+}
+
+fn android_openmp_lib_dir(target_arch: &str) -> Option<PathBuf> {
+    let ndk_root = env::var_os("ANDROID_NDK_ROOT")
+        .or_else(|| env::var_os("ANDROID_NDK"))
+        .map(PathBuf::from)?;
+    let clang_root = ndk_root
+        .join("toolchains/llvm/prebuilt/linux-x86_64/lib/clang");
+    let arch_dir = match target_arch {
+        "aarch64" => "aarch64",
+        "arm" => "arm",
+        "x86" => "i386",
+        "x86_64" => "x86_64",
+        _ => return None,
+    };
+    let mut versions = std::fs::read_dir(clang_root)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.join("lib/linux").exists())
+        .collect::<Vec<_>>();
+    versions.sort();
+    versions
+        .into_iter()
+        .rev()
+        .map(|path| path.join("lib/linux").join(arch_dir))
+        .find(|path| path.join("libomp.so").exists() || path.join("libomp.a").exists())
 }
 
 fn build_wasm(llama_dir: &Path, target_arch: &str, enable_webgpu: bool) -> PathBuf {
