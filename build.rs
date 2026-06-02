@@ -44,6 +44,7 @@ fn main() {
         cfg.profile("Release");
         cfg.define("BUILD_SHARED_LIBS", "OFF");
         cfg.define("CMAKE_POSITION_INDEPENDENT_CODE", "ON");
+        cfg.define("LLAMA_BUILD_APP", "OFF");
         cfg.define("LLAMA_BUILD_COMMON", "OFF");
         cfg.define("LLAMA_BUILD_TESTS", "OFF");
         cfg.define("LLAMA_BUILD_TOOLS", "OFF");

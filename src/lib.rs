@@ -84,6 +84,13 @@ pub mod raw {
 
     #[repr(i32)]
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum llama_context_type {
+        Default = 0,
+        Mtp = 1,
+    }
+
+    #[repr(i32)]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum llama_split_mode {
         None = 0,
         Layer = 1,
@@ -171,8 +178,11 @@ pub mod raw {
         pub n_batch: u32,
         pub n_ubatch: u32,
         pub n_seq_max: u32,
+        pub n_rs_seq: u32,
+        pub n_outputs_max: u32,
         pub n_threads: i32,
         pub n_threads_batch: i32,
+        pub ctx_type: llama_context_type,
         pub rope_scaling_type: llama_rope_scaling_type,
         pub pooling_type: llama_pooling_type,
         pub attention_type: llama_attention_type,
