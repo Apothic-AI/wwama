@@ -676,6 +676,9 @@ impl Default for SessionOptions {
 
 #[derive(Clone, Debug)]
 pub struct GenerationOptions {
+    /// Maximum number of generated tokens. `0` means no explicit generation
+    /// limit; generation then stops on EOG or the model/context backend's own
+    /// limit.
     pub max_new_tokens: usize,
     pub temperature: f32,
     pub top_k: i32,
@@ -689,7 +692,7 @@ pub struct GenerationOptions {
 impl Default for GenerationOptions {
     fn default() -> Self {
         Self {
-            max_new_tokens: 256,
+            max_new_tokens: 0,
             temperature: 0.0,
             top_k: 40,
             top_p: 0.95,
@@ -1013,7 +1016,11 @@ impl Session {
         let mut output = GenerateOutput::default();
         let mut position = prompt_tokens.len() as raw::llama_pos;
 
-        for _ in 0..options.max_new_tokens {
+        let mut emitted_tokens = 0_usize;
+        loop {
+            if options.max_new_tokens > 0 && emitted_tokens >= options.max_new_tokens {
+                break;
+            }
             let token = sampler.sample(&mut self.context);
             if self.model.is_eog(token) {
                 break;
@@ -1023,6 +1030,7 @@ impl Session {
             on_token(&piece, token)?;
             output.text.push_str(&piece);
             output.token_count += 1;
+            emitted_tokens += 1;
 
             self.evaluate_tokens(&[token], position, true)?;
             position += 1;
@@ -1660,5 +1668,15 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
         dot / denom
     } else {
         0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generation_options_default_has_no_explicit_token_cap() {
+        assert_eq!(GenerationOptions::default().max_new_tokens, 0);
     }
 }
