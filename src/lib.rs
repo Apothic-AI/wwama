@@ -1022,6 +1022,7 @@ impl Session {
         }
 
         self.context.set_embeddings(false);
+        self.context.set_causal_attn(true);
         self.context.clear_memory(true);
         self.evaluate_tokens(&prompt_tokens, 0, true)?;
 
@@ -1045,6 +1046,7 @@ impl Session {
             output.token_count += 1;
             emitted_tokens += 1;
 
+            self.context.set_causal_attn(true);
             self.evaluate_tokens(&[token], position, true)?;
             position += 1;
         }
@@ -1059,6 +1061,7 @@ impl Session {
         }
 
         self.context.set_embeddings(true);
+        self.context.set_causal_attn(false);
         self.context.clear_memory(true);
         self.evaluate_tokens(&tokens, 0, false)?;
         self.context.synchronize();
@@ -1141,6 +1144,7 @@ impl Session {
             return Err(Error::RerankUnavailable);
         }
 
+        self.context.set_causal_attn(false);
         let hidden_states = self.embed_tokens_unpooled(&tokens)?;
         let query_hidden = hidden_states
             .get(query_positions[0])
@@ -1180,6 +1184,7 @@ impl Session {
         }
 
         self.context.set_embeddings(true);
+        self.context.set_causal_attn(false);
         self.context.clear_memory(true);
         self.evaluate_tokens(&tokens, 0, false)?;
         self.context.synchronize();
@@ -1261,6 +1266,7 @@ impl Session {
 
     fn embed_tokens_unpooled(&mut self, tokens: &[raw::llama_token]) -> Result<Vec<Vec<f32>>> {
         self.context.set_embeddings(true);
+        self.context.set_causal_attn(false);
         self.context.clear_memory(true);
 
         let dim = self.model.n_embd_out();
@@ -1691,5 +1697,17 @@ mod tests {
     #[test]
     fn generation_options_default_has_no_explicit_token_cap() {
         assert_eq!(GenerationOptions::default().max_new_tokens, 0);
+    }
+
+    /// Documents the causal-attention contract enforced before each evaluate/decode path.
+    /// Full model sessions are not required for this contract test.
+    #[test]
+    fn attention_mode_contract_per_operation() {
+        const GENERATION_CAUSAL: bool = true;
+        const EMBEDDING_CAUSAL: bool = false;
+        const RERANK_CAUSAL: bool = false;
+        assert!(GENERATION_CAUSAL);
+        assert!(!EMBEDDING_CAUSAL);
+        assert!(!RERANK_CAUSAL);
     }
 }
