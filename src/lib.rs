@@ -759,6 +759,20 @@ pub struct RerankOutput {
     pub token_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttentionOperation {
+    Generation,
+    Embedding,
+    Rerank,
+}
+
+fn causal_attention_for_operation(operation: AttentionOperation) -> bool {
+    match operation {
+        AttentionOperation::Generation => true,
+        AttentionOperation::Embedding | AttentionOperation::Rerank => false,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct JinaRerankProjector {
     linear1_weight: Vec<f32>,
@@ -1022,7 +1036,9 @@ impl Session {
         }
 
         self.context.set_embeddings(false);
-        self.context.set_causal_attn(true);
+        self.context.set_causal_attn(causal_attention_for_operation(
+            AttentionOperation::Generation,
+        ));
         self.context.clear_memory(true);
         self.evaluate_tokens(&prompt_tokens, 0, true)?;
 
@@ -1046,7 +1062,9 @@ impl Session {
             output.token_count += 1;
             emitted_tokens += 1;
 
-            self.context.set_causal_attn(true);
+            self.context.set_causal_attn(causal_attention_for_operation(
+                AttentionOperation::Generation,
+            ));
             self.evaluate_tokens(&[token], position, true)?;
             position += 1;
         }
@@ -1061,7 +1079,9 @@ impl Session {
         }
 
         self.context.set_embeddings(true);
-        self.context.set_causal_attn(false);
+        self.context.set_causal_attn(causal_attention_for_operation(
+            AttentionOperation::Embedding,
+        ));
         self.context.clear_memory(true);
         self.evaluate_tokens(&tokens, 0, false)?;
         self.context.synchronize();
@@ -1144,7 +1164,8 @@ impl Session {
             return Err(Error::RerankUnavailable);
         }
 
-        self.context.set_causal_attn(false);
+        self.context
+            .set_causal_attn(causal_attention_for_operation(AttentionOperation::Rerank));
         let hidden_states = self.embed_tokens_unpooled(&tokens)?;
         let query_hidden = hidden_states
             .get(query_positions[0])
@@ -1184,7 +1205,8 @@ impl Session {
         }
 
         self.context.set_embeddings(true);
-        self.context.set_causal_attn(false);
+        self.context
+            .set_causal_attn(causal_attention_for_operation(AttentionOperation::Rerank));
         self.context.clear_memory(true);
         self.evaluate_tokens(&tokens, 0, false)?;
         self.context.synchronize();
@@ -1266,7 +1288,8 @@ impl Session {
 
     fn embed_tokens_unpooled(&mut self, tokens: &[raw::llama_token]) -> Result<Vec<Vec<f32>>> {
         self.context.set_embeddings(true);
-        self.context.set_causal_attn(false);
+        self.context
+            .set_causal_attn(causal_attention_for_operation(AttentionOperation::Rerank));
         self.context.clear_memory(true);
 
         let dim = self.model.n_embd_out();
@@ -1703,11 +1726,12 @@ mod tests {
     /// Full model sessions are not required for this contract test.
     #[test]
     fn attention_mode_contract_per_operation() {
-        const GENERATION_CAUSAL: bool = true;
-        const EMBEDDING_CAUSAL: bool = false;
-        const RERANK_CAUSAL: bool = false;
-        assert!(GENERATION_CAUSAL);
-        assert!(!EMBEDDING_CAUSAL);
-        assert!(!RERANK_CAUSAL);
+        assert!(causal_attention_for_operation(
+            AttentionOperation::Generation
+        ));
+        assert!(!causal_attention_for_operation(
+            AttentionOperation::Embedding
+        ));
+        assert!(!causal_attention_for_operation(AttentionOperation::Rerank));
     }
 }
