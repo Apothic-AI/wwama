@@ -279,6 +279,7 @@ pub mod raw {
 
         pub fn llama_pooling_type(ctx: *const llama_context) -> llama_pooling_type;
         pub fn llama_set_embeddings(ctx: *mut llama_context, embeddings: bool);
+        pub fn llama_set_causal_attn(ctx: *mut llama_context, causal_attn: bool);
         pub fn llama_synchronize(ctx: *mut llama_context);
 
         pub fn llama_memory_clear(mem: llama_memory_t, data: bool);
@@ -560,6 +561,10 @@ impl Context {
 
     pub fn set_embeddings(&mut self, enabled: bool) {
         unsafe { raw::llama_set_embeddings(self.ptr.as_ptr(), enabled) }
+    }
+
+    pub fn set_causal_attn(&mut self, causal_attn: bool) {
+        unsafe { raw::llama_set_causal_attn(self.ptr.as_ptr(), causal_attn) }
     }
 
     pub fn synchronize(&mut self) {
@@ -868,7 +873,15 @@ impl Session {
         context_params.n_threads_batch = options.n_threads_batch;
         context_params.embeddings = options.embeddings;
         context_params.pooling_type = options.pooling_type;
-        let context = Context::new(&model, context_params)?;
+        if options.embeddings {
+            // Embedding/rerank models (Qwen3-Embedding, etc.) require bidirectional attention.
+            context_params.attention_type = raw::llama_attention_type::NonCausal;
+            context_params.flash_attn_type = raw::llama_flash_attn_type::Disabled;
+        }
+        let mut context = Context::new(&model, context_params)?;
+        if options.embeddings {
+            context.set_causal_attn(false);
+        }
 
         Ok(Self {
             context,
