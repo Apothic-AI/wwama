@@ -1,5 +1,6 @@
 use std::env;
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -40,6 +41,7 @@ fn main() {
     let dst = if is_wasm {
         build_wasm(&llama_dir, &target_arch, enable_webgpu)
     } else {
+        invalidate_stale_native_cmake_tree(enable_cuda, enable_vulkan);
         let mut cfg = cmake::Config::new(&llama_dir);
         cfg.profile("Release");
         cfg.define("BUILD_SHARED_LIBS", "OFF");
@@ -173,6 +175,24 @@ fn android_openmp_lib_dir(target_arch: &str) -> Option<PathBuf> {
         .rev()
         .map(|path| path.join("lib/linux").join(arch_dir))
         .find(|path| path.join("libomp.so").exists() || path.join("libomp.a").exists())
+}
+
+fn invalidate_stale_native_cmake_tree(enable_cuda: bool, enable_vulkan: bool) {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
+    let stamp_path = out_dir.join("wwama-cmake-profile.txt");
+    let profile = format!(
+        "cuda={enable_cuda}\nvulkan={enable_vulkan}\ncuda_compiler={}\n",
+        cuda_compiler()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default()
+    );
+    let stale = fs::read_to_string(&stamp_path)
+        .map(|existing| existing != profile)
+        .unwrap_or(true);
+    if stale {
+        let _ = fs::remove_dir_all(out_dir.join("build"));
+        let _ = fs::write(stamp_path, profile);
+    }
 }
 
 fn emit_cuda_link_flags(install_dir: &Path) {
