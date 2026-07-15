@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./wwama-logo_transp.png" alt="wwama logo" width="320">
+</p>
+
 # wwama
 
 `wwama` is a small Rust wrapper crate around a local `llama.cpp` checkout. It is intended to make the `llama.cpp` C API available to Rust code on native targets and browser-oriented WebAssembly targets, including both `wasm32-unknown-unknown` and `wasm64-unknown-unknown`.
