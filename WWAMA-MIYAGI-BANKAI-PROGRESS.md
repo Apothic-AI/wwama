@@ -23,6 +23,9 @@
 - `wwama` currently lacks a public logits accessor and probe-oriented evaluation
   helper, so deterministic logit-gap measurement is also a required backend
   capability.
+- The preferred tensor-access path is a `wwama`-owned C/C++ bridge using the
+  existing llama.cpp internals and GGML transfer APIs; llama.cpp source changes
+  are an escalation only if bridge validation fails.
 - `miyagi` is currently only an empty README placeholder.
 
 ## Baseline Verification

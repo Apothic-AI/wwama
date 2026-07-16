@@ -24,7 +24,7 @@ The following observations were verified in the checked-out sources:
 | Existing `wwama` runtime | [`wwama/src/lib.rs`](src/lib.rs) already provides `Session`, tokenization, detokenization, generation/streaming, embeddings, chat templates, and raw FFI. | Most Bankai runtime work can build on existing session primitives. |
 | Missing logits readout | `Session::evaluate_tokens` is private, `Context` exposes decode but no logits accessor, and `raw` does not bind `llama_get_logits_ith`. | `wwama` needs deterministic prompt evaluation and selected-logit readout so `miyagi` does not duplicate batch, cache-reset, and synchronization logic. |
 | Missing tensor access | `wwama::Model` exposes vocabulary and model metadata, but no tensor enumeration, name lookup, tensor descriptor, read, or write methods. | A new capability is required before `miyagi` can inspect or modify weights. |
-| `llama.cpp` model lookup | [`llama-model.h`](../../cpp/llama.cpp/src/llama-model.h) declares the internal `llama_internal_get_tensor_map`, while public [`llama.h`](../../cpp/llama.cpp/include/llama.h) does not expose equivalent model-tensor access. | The implementation must choose between a narrow C/C++ bridge tied to this fork and a future upstream API addition. |
+| `llama.cpp` model lookup | [`llama-model.h`](../../cpp/llama.cpp/src/llama-model.h) declares the internal `llama_internal_get_tensor_map`, while public [`llama.h`](../../cpp/llama.cpp/include/llama.h) does not expose equivalent model-tensor access. | The default path is a narrow C/C++ bridge built and owned by `wwama`; changing `llama.cpp` is an escalation only if that bridge fails validation. |
 | Device-resident tensor transfer | [`ggml-backend.h`](../../cpp/llama.cpp/ggml/include/ggml-backend.h) exposes `ggml_backend_tensor_get` and `ggml_backend_tensor_set`. | A host-side read-modify-write path may support CPU and GPU-resident tensors without exposing raw device pointers. |
 | Binary quantization layout | [`ggml-common.h`](../../cpp/llama.cpp/ggml/src/ggml-common.h) defines `QK1_0 = 128` and `block_q1_0` as a 2-byte `d` scale plus 16 packed-bit bytes. [`ggml.h`](../../cpp/llama.cpp/ggml/include/ggml.h) exposes tensor shape and byte strides. | A row XOR must modify only packed `qs` bytes, preserve scales, and honor tensor strides and orientation. |
 | Current Rust FFI coverage | `wwama::raw::ggml_type` includes `Tq1_0` but not `Q1_0`; there are no raw bindings for `ggml_tensor`, tensor metadata helpers, backend tensor transfer, or the internal model tensor map. | FFI additions and safety checks are necessary; hard-coding model dimensions would be brittle. |
@@ -62,6 +62,7 @@ The following observations were verified in the checked-out sources:
 - hard-coding Bonsai/Qwen dimensions into `wwama`;
 - promising WebAssembly support for mutable model tensors before runtime
   behavior is demonstrated;
+- changing the `llama.cpp` source tree during the initial implementation;
 - changing the upstream remote or canonical monorepo integration.
 
 ## Sprint Sequence
@@ -84,8 +85,9 @@ The following observations were verified in the checked-out sources:
 
 - A short API contract exists in Rust doc comments or design tests.
 - Supported tensor layouts and the target matrix are explicit.
-- The decision about a local C/C++ bridge versus a required upstream
-  `llama.cpp` API is recorded with evidence.
+- The local C/C++ bridge is selected as the default implementation path.
+- Any need for a public `llama.cpp` API is recorded as an explicit escalation
+  backed by a reproducible bridge failure.
 
 ### Sprint 1: Build a tensor inventory probe
 
@@ -236,10 +238,13 @@ The following observations were verified in the checked-out sources:
 ### Tensor lookup implementation
 
 The public C API does not expose model tensors, but this fork has an internal
-tensor map. Prefer a narrow bridge that returns stable metadata and performs
-validated operations. If that bridge cannot be linked or cannot remain stable
-across the supported fork, stop and add a deliberate upstream `llama.cpp` API
-instead of binding Rust directly to private C++ object layout.
+tensor map. The preferred implementation is a narrow bridge compiled as part
+of `wwama`; it should return stable metadata and perform validated operations
+without modifying the `llama.cpp` source tree. If the bridge cannot be linked,
+cannot support the required native backends, or cannot remain stable across the
+supported fork, stop and document the failure before considering a deliberate
+public `llama.cpp` API. Do not bind safe Rust code directly to private C++
+object layout.
 
 ### GPU mutation semantics
 
@@ -282,7 +287,8 @@ is insufficient.
 
 ## First Implementation Slice
 
-1. Add native tensor inventory/descriptor support.
+1. Add native tensor inventory/descriptor support through a `wwama`-owned
+   bridge, without changing `llama.cpp` sources.
 2. Add deterministic final-position logits evaluation.
 3. Add a Q1_0-only row read-modify-write operation with explicit validation.
 4. Add byte-level and model-backed reversibility tests.
