@@ -17,6 +17,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=WWAMA_CUDA_HOST_COMPILER");
     println!("cargo:rerun-if-env-changed=VULKAN_SDK");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/bridge/wwama_tensor_bridge.cpp");
+    println!("cargo:rerun-if-changed=src/bridge/wwama_tensor_bridge.h");
 
     let llama_dir = find_llama_cpp_dir();
     println!("cargo:rerun-if-changed={}", llama_dir.display());
@@ -30,6 +32,9 @@ fn main() {
     let requested_vulkan = env::var_os("CARGO_FEATURE_VULKAN").is_some();
 
     let is_wasm = target.starts_with("wasm32") || target.starts_with("wasm64");
+    if !is_wasm {
+        build_tensor_bridge(&llama_dir);
+    }
     if is_wasm && requested_cuda {
         panic!("wwama feature `cuda` is only supported for native targets");
     }
@@ -135,6 +140,19 @@ fn main() {
         }
         _ => {}
     }
+}
+
+fn build_tensor_bridge(llama_dir: &Path) {
+    cc::Build::new()
+        .cpp(true)
+        .std("c++17")
+        .warnings(true)
+        .include("src/bridge")
+        .include(llama_dir.join("include"))
+        .include(llama_dir.join("src"))
+        .include(llama_dir.join("ggml/include"))
+        .file("src/bridge/wwama_tensor_bridge.cpp")
+        .compile("wwama_tensor_bridge");
 }
 
 fn cmake_cache_bool(install_dir: &Path, key: &str) -> bool {

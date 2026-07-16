@@ -13,6 +13,9 @@ The crate exposes both the low-level pieces needed for direct `llama.cpp` access
 - providing lightweight RAII wrappers for backend, model, context, and batch lifetimes;
 - loading GGUF models into a `Session`;
 - tokenizing, detokenizing, applying chat templates, generating text, streaming generated token pieces, and producing embedding vectors;
+- evaluating selected final-position logits with a clean context;
+- inventorying native model tensors and transferring validated byte ranges through their GGML backend;
+- extracting Q1_0 row scales and applying reversible packed-bit row XOR mutations;
 - supporting WebGPU-enabled Emscripten builds for WebAssembly;
 - avoiding `llama.cpp` examples, tools, and server targets.
 
@@ -37,6 +40,40 @@ let embedding = session.embed_text("search text", &Default::default())?;
 ```
 
 For streaming, use `Session::stream_text(...)` with a token-piece callback. The raw `Model`, `Context`, `Batch`, and `raw::*` surfaces remain available for adapters that need lower-level control.
+
+## Mutable Model Tensors
+
+Tensor inventory is available from `Model::tensors()` and `Model::tensor()` on
+native targets. Writes and Q1_0 row mutation require an explicit mutable load:
+
+```rust
+let mut session = wwama::Session::load_from_path(
+    "/models/model.gguf",
+    wwama::SessionOptions {
+        mutable_tensors: true,
+        ..wwama::SessionOptions::default()
+    },
+)?;
+
+let descriptor = session.model().tensor("blk.0.ffn_gate.weight")?;
+let scales = session.q1_0_row_scales(&descriptor.name)?;
+session.xor_q1_0_row(&descriptor.name, 0)?;
+session.xor_q1_0_row(&descriptor.name, 0)?; // restores the original row
+```
+
+`mutable_tensors` disables read-only model mmap so weights reside in writable
+backend storage. This increases model load time and resident memory. Mutation
+methods require `&mut Session`, synchronize the context around transfers, and
+do not expose GGML tensor pointers. The Q1_0 operation validates a two-dimensional
+matrix with 128 values and 18 bytes per block, preserves each FP16 scale, and
+inverts only the 16 packed weight bytes.
+
+WebAssembly tensor mutation is deliberately unsupported until an Emscripten or
+WebGPU runtime fixture demonstrates correct transfer and visibility semantics.
+The `tensor_inventory` example prints names, types, dimensions, strides, byte
+sizes, and backend storage. The `miyagi_backend` example demonstrates the
+Bankai-facing load, architecture mapping, row-scale, logit-gap, flip, revert,
+and generation contract without putting architecture-specific names in wwama.
 
 ## Repository Layout
 

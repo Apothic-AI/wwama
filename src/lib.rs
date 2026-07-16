@@ -11,6 +11,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ffi::CStr;
 use core::fmt;
+use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::slice;
 use core::str;
@@ -132,6 +133,7 @@ pub mod raw {
         Bf16 = 30,
         Tq1_0 = 34,
         Tq2_0 = 35,
+        Q1_0 = 41,
     }
 
     #[repr(C)]
@@ -236,6 +238,20 @@ pub mod raw {
         pub content: *const c_char,
     }
 
+    #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct wwama_tensor_descriptor {
+        pub name: *const c_char,
+        pub type_name: *const c_char,
+        pub backend_name: *const c_char,
+        pub type_id: i32,
+        pub n_dims: i32,
+        pub ne: [i64; 4],
+        pub nb: [usize; 4],
+        pub nbytes: usize,
+    }
+
     unsafe extern "C" {
         pub fn llama_model_default_params() -> llama_model_params;
         pub fn llama_context_default_params() -> llama_context_params;
@@ -301,6 +317,7 @@ pub mod raw {
             ctx: *mut llama_context,
             seq_id: llama_seq_id,
         ) -> *mut c_float;
+        pub fn llama_get_logits_ith(ctx: *mut llama_context, i: i32) -> *mut c_float;
 
         pub fn llama_tokenize(
             vocab: *const llama_vocab,
@@ -350,6 +367,37 @@ pub mod raw {
             ctx: *mut llama_context,
             idx: i32,
         ) -> llama_token;
+
+        #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+        pub fn wwama_tensor_count(model: *const llama_model) -> usize;
+        #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+        pub fn wwama_tensor_descriptor_at(
+            model: *const llama_model,
+            index: usize,
+            descriptor: *mut wwama_tensor_descriptor,
+        ) -> i32;
+        #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+        pub fn wwama_tensor_descriptor_named(
+            model: *const llama_model,
+            name: *const c_char,
+            descriptor: *mut wwama_tensor_descriptor,
+        ) -> i32;
+        #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+        pub fn wwama_tensor_read(
+            model: *const llama_model,
+            name: *const c_char,
+            offset: usize,
+            destination: *mut c_void,
+            size: usize,
+        ) -> i32;
+        #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+        pub fn wwama_tensor_write(
+            model: *mut llama_model,
+            name: *const c_char,
+            offset: usize,
+            source: *const c_void,
+            size: usize,
+        ) -> i32;
     }
 }
 
@@ -377,6 +425,18 @@ pub enum Error {
     EmbeddingUnavailable,
     RerankUnavailable,
     ProjectorInvalid,
+    DecoderLogitsUnavailable,
+    InvalidToken,
+    ContextOverflow,
+    TensorNotFound,
+    TensorTransferUnavailable,
+    TensorTransferOutOfBounds,
+    TensorMutationDisabled,
+    UnsupportedTensorType,
+    UnsupportedTensorShape,
+    UnsupportedTensorStride,
+    InvalidTensorRow,
+    UnsupportedTarget,
 }
 
 impl fmt::Display for Error {
@@ -399,12 +459,113 @@ impl fmt::Display for Error {
                 f.write_str("llama.cpp reranking requires embeddings enabled with rank pooling")
             }
             Self::ProjectorInvalid => f.write_str("invalid rerank projector"),
+            Self::DecoderLogitsUnavailable => f.write_str("model did not provide decoder logits"),
+            Self::InvalidToken => f.write_str("token ID is outside the model vocabulary"),
+            Self::ContextOverflow => f.write_str("token sequence exceeds the context window"),
+            Self::TensorNotFound => f.write_str("model tensor was not found"),
+            Self::TensorTransferUnavailable => {
+                f.write_str("model tensor cannot be transferred through its backend")
+            }
+            Self::TensorTransferOutOfBounds => {
+                f.write_str("model tensor transfer is out of bounds")
+            }
+            Self::TensorMutationDisabled => {
+                f.write_str("model was not loaded with mutable tensors enabled")
+            }
+            Self::UnsupportedTensorType => f.write_str("unsupported model tensor type"),
+            Self::UnsupportedTensorShape => f.write_str("unsupported model tensor shape"),
+            Self::UnsupportedTensorStride => f.write_str("unsupported model tensor stride"),
+            Self::InvalidTensorRow => f.write_str("model tensor row is out of bounds"),
+            Self::UnsupportedTarget => {
+                f.write_str("mutable model tensor access is unsupported on this target")
+            }
         }
     }
 }
 
 #[cfg(feature = "std")]
 impl std::error::Error for Error {}
+
+/// Owned model-tensor metadata copied from llama.cpp.
+///
+/// Dimensions and byte strides use GGML ordering. For an ordinary matrix,
+/// `dimensions[0]` is the input width and `dimensions[1]` is the logical row
+/// count. Higher dimensions must be one for Q1_0 row mutation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TensorDescriptor {
+    pub name: String,
+    pub type_id: i32,
+    pub type_name: String,
+    pub dimensions: [u64; 4],
+    pub strides: [usize; 4],
+    pub n_dims: usize,
+    pub nbytes: usize,
+    pub backend: String,
+}
+
+impl TensorDescriptor {
+    pub fn row_count(&self) -> Result<usize> {
+        if self.n_dims != 2 || self.dimensions[2] != 1 || self.dimensions[3] != 1 {
+            return Err(Error::UnsupportedTensorShape);
+        }
+        usize::try_from(self.dimensions[1]).map_err(|_| Error::UnsupportedTensorShape)
+    }
+}
+
+/// Summary of a completed Q1_0 row XOR operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RowXorResult {
+    pub row: usize,
+    pub blocks: usize,
+    pub packed_bytes_flipped: usize,
+}
+
+const Q1_0_TYPE_ID: i32 = 41;
+const Q1_0_BLOCK_VALUES: usize = 128;
+const Q1_0_SCALE_BYTES: usize = 2;
+const Q1_0_PACKED_BYTES: usize = Q1_0_BLOCK_VALUES / 8;
+const Q1_0_BLOCK_BYTES: usize = Q1_0_SCALE_BYTES + Q1_0_PACKED_BYTES;
+
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+fn tensor_bridge_error(status: i32) -> Error {
+    match status {
+        2 => Error::TensorNotFound,
+        3 => Error::TensorTransferOutOfBounds,
+        4 => Error::TensorTransferUnavailable,
+        _ => Error::InvalidInput,
+    }
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+unsafe fn owned_tensor_descriptor(raw: raw::wwama_tensor_descriptor) -> Result<TensorDescriptor> {
+    if raw.name.is_null() || raw.type_name.is_null() || raw.n_dims < 0 || raw.n_dims > 4 {
+        return Err(Error::InvalidInput);
+    }
+    let mut dimensions = [0_u64; 4];
+    for (destination, source) in dimensions.iter_mut().zip(raw.ne) {
+        *destination = u64::try_from(source).map_err(|_| Error::UnsupportedTensorShape)?;
+    }
+    Ok(TensorDescriptor {
+        name: unsafe { CStr::from_ptr(raw.name) }
+            .to_string_lossy()
+            .into_owned(),
+        type_id: raw.type_id,
+        type_name: unsafe { CStr::from_ptr(raw.type_name) }
+            .to_string_lossy()
+            .into_owned(),
+        dimensions,
+        strides: raw.nb,
+        n_dims: raw.n_dims as usize,
+        nbytes: raw.nbytes,
+        backend: if raw.backend_name.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(raw.backend_name) }
+                .to_string_lossy()
+                .into_owned()
+        },
+    })
+}
 
 pub struct Backend;
 
@@ -519,6 +680,98 @@ impl Model {
     pub fn is_eog(&self, token: raw::llama_token) -> bool {
         unsafe { raw::llama_vocab_is_eog(self.vocab(), token) }
     }
+
+    /// Returns owned metadata for every tensor loaded by llama.cpp.
+    ///
+    /// This inventory is available on native targets. Mutable tensor access is
+    /// intentionally unavailable on WebAssembly until runtime transfer behavior
+    /// is validated there.
+    pub fn tensors(&self) -> Result<Vec<TensorDescriptor>> {
+        #[cfg(any(target_arch = "wasm32", target_arch = "wasm64"))]
+        {
+            Err(Error::UnsupportedTarget)
+        }
+        #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+        {
+            let count = unsafe { raw::wwama_tensor_count(self.ptr.as_ptr()) };
+            let mut tensors = Vec::with_capacity(count);
+            for index in 0..count {
+                let mut descriptor = MaybeUninit::uninit();
+                let status = unsafe {
+                    raw::wwama_tensor_descriptor_at(
+                        self.ptr.as_ptr(),
+                        index,
+                        descriptor.as_mut_ptr(),
+                    )
+                };
+                if status != 0 {
+                    return Err(tensor_bridge_error(status));
+                }
+                tensors.push(unsafe { owned_tensor_descriptor(descriptor.assume_init()) }?);
+            }
+            Ok(tensors)
+        }
+    }
+
+    pub fn tensor(&self, name: &str) -> Result<TensorDescriptor> {
+        #[cfg(any(target_arch = "wasm32", target_arch = "wasm64"))]
+        {
+            let _ = name;
+            Err(Error::UnsupportedTarget)
+        }
+        #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+        {
+            let name = CString::new(name).map_err(|_| Error::InvalidCString)?;
+            let mut descriptor = MaybeUninit::uninit();
+            let status = unsafe {
+                raw::wwama_tensor_descriptor_named(
+                    self.ptr.as_ptr(),
+                    name.as_ptr(),
+                    descriptor.as_mut_ptr(),
+                )
+            };
+            if status != 0 {
+                return Err(tensor_bridge_error(status));
+            }
+            unsafe { owned_tensor_descriptor(descriptor.assume_init()) }
+        }
+    }
+
+    #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+    fn read_tensor_range(&self, name: &CStr, offset: usize, destination: &mut [u8]) -> Result<()> {
+        let status = unsafe {
+            raw::wwama_tensor_read(
+                self.ptr.as_ptr(),
+                name.as_ptr(),
+                offset,
+                destination.as_mut_ptr().cast(),
+                destination.len(),
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(tensor_bridge_error(status))
+        }
+    }
+
+    #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+    fn write_tensor_range(&mut self, name: &CStr, offset: usize, source: &[u8]) -> Result<()> {
+        let status = unsafe {
+            raw::wwama_tensor_write(
+                self.ptr.as_ptr(),
+                name.as_ptr(),
+                offset,
+                source.as_ptr().cast(),
+                source.len(),
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(tensor_bridge_error(status))
+        }
+    }
 }
 
 impl Drop for Model {
@@ -597,6 +850,10 @@ impl Context {
         unsafe { raw::llama_get_embeddings_seq(self.ptr.as_ptr(), seq_id) }
     }
 
+    pub fn logits_ith(&mut self, index: i32) -> *mut f32 {
+        unsafe { raw::llama_get_logits_ith(self.ptr.as_ptr(), index) }
+    }
+
     pub fn tokenize(
         &self,
         vocab: *const raw::llama_vocab,
@@ -659,6 +916,10 @@ pub struct SessionOptions {
     pub n_threads: i32,
     pub n_threads_batch: i32,
     pub n_gpu_layers: i32,
+    /// Loads weights into writable backend storage instead of a read-only mmap.
+    /// This increases load time and resident memory and is required for writes
+    /// and Q1_0 XOR mutation.
+    pub mutable_tensors: bool,
     pub embeddings: bool,
     pub pooling_type: raw::llama_pooling_type,
 }
@@ -673,6 +934,7 @@ impl Default for SessionOptions {
             n_threads: 0,
             n_threads_batch: 0,
             n_gpu_layers: 999,
+            mutable_tensors: false,
             embeddings: false,
             pooling_type: raw::llama_pooling_type::Unspecified,
         }
@@ -868,6 +1130,7 @@ pub struct Session {
     context: Context,
     model: Model,
     n_batch: usize,
+    mutable_tensors: bool,
 }
 
 impl Session {
@@ -876,6 +1139,7 @@ impl Session {
 
         let mut model_params = Model::default_params();
         model_params.n_gpu_layers = options.n_gpu_layers;
+        model_params.use_mmap = !options.mutable_tensors;
         let model = Model::load_from_path(path, model_params)?;
 
         let mut context_params = Context::default_params();
@@ -901,6 +1165,7 @@ impl Session {
             context,
             model,
             n_batch: options.n_batch.max(1) as usize,
+            mutable_tensors: options.mutable_tensors,
         })
     }
 
@@ -1003,6 +1268,197 @@ impl Session {
                 return Err(Error::DetokenizationFailed);
             }
             capacity = needed;
+        }
+    }
+
+    /// Evaluates a tokenized prompt with a clean context and returns selected
+    /// logits at the final prompt position.
+    pub fn evaluate_selected_logits(
+        &mut self,
+        prompt_tokens: &[raw::llama_token],
+        selected_tokens: &[raw::llama_token],
+    ) -> Result<Vec<f32>> {
+        if prompt_tokens.is_empty() || selected_tokens.is_empty() {
+            return Err(Error::InvalidInput);
+        }
+        if prompt_tokens.len() > self.context.n_ctx() as usize {
+            return Err(Error::ContextOverflow);
+        }
+        let n_vocab = self.model.n_vocab();
+        if selected_tokens
+            .iter()
+            .any(|token| *token < 0 || *token >= n_vocab)
+        {
+            return Err(Error::InvalidToken);
+        }
+        if !self.model.has_decoder() {
+            return Err(Error::DecoderLogitsUnavailable);
+        }
+
+        self.context.set_embeddings(false);
+        self.context.set_causal_attn(causal_attention_for_operation(
+            AttentionOperation::Generation,
+        ));
+        self.context.clear_memory(true);
+        self.evaluate_tokens(prompt_tokens, 0, true)?;
+        self.context.synchronize();
+
+        let logits = self.context.logits_ith(-1);
+        if logits.is_null() {
+            return Err(Error::DecoderLogitsUnavailable);
+        }
+        Ok(selected_tokens
+            .iter()
+            .map(|token| unsafe { *logits.add(*token as usize) })
+            .collect())
+    }
+
+    /// Returns `logit(correct) - logit(wrong)` after a clean prompt evaluation.
+    pub fn logit_gap(
+        &mut self,
+        prompt_tokens: &[raw::llama_token],
+        correct: raw::llama_token,
+        wrong: raw::llama_token,
+    ) -> Result<f32> {
+        let logits = self.evaluate_selected_logits(prompt_tokens, &[correct, wrong])?;
+        Ok(logits[0] - logits[1])
+    }
+
+    /// Reads an entire tensor through its GGML backend transfer implementation.
+    /// Inference and mutation are serialized by the required `&mut Session`.
+    pub fn read_tensor(&mut self, name: &str) -> Result<Vec<u8>> {
+        #[cfg(any(target_arch = "wasm32", target_arch = "wasm64"))]
+        {
+            let _ = name;
+            Err(Error::UnsupportedTarget)
+        }
+        #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+        {
+            let descriptor = self.model.tensor(name)?;
+            self.read_tensor_range(name, 0, descriptor.nbytes)
+        }
+    }
+
+    /// Reads a validated byte range through the tensor's owning GGML backend.
+    pub fn read_tensor_range(&mut self, name: &str, offset: usize, size: usize) -> Result<Vec<u8>> {
+        #[cfg(any(target_arch = "wasm32", target_arch = "wasm64"))]
+        {
+            let _ = (name, offset, size);
+            Err(Error::UnsupportedTarget)
+        }
+        #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+        {
+            let name = CString::new(name).map_err(|_| Error::InvalidCString)?;
+            let mut bytes = vec![0_u8; size];
+            self.context.synchronize();
+            self.model.read_tensor_range(&name, offset, &mut bytes)?;
+            Ok(bytes)
+        }
+    }
+
+    /// Writes an entire tensor through its GGML backend transfer implementation.
+    /// The byte length must exactly match the loaded tensor.
+    pub fn write_tensor(&mut self, name: &str, bytes: &[u8]) -> Result<()> {
+        #[cfg(any(target_arch = "wasm32", target_arch = "wasm64"))]
+        {
+            let _ = (name, bytes);
+            Err(Error::UnsupportedTarget)
+        }
+        #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+        {
+            let descriptor = self.model.tensor(name)?;
+            if bytes.len() != descriptor.nbytes {
+                return Err(Error::TensorTransferOutOfBounds);
+            }
+            self.write_tensor_range(name, 0, bytes)
+        }
+    }
+
+    /// Writes a validated byte range through the tensor's owning GGML backend.
+    /// Callers are responsible for preserving the tensor's encoding invariants.
+    pub fn write_tensor_range(&mut self, name: &str, offset: usize, bytes: &[u8]) -> Result<()> {
+        if !self.mutable_tensors {
+            return Err(Error::TensorMutationDisabled);
+        }
+        #[cfg(any(target_arch = "wasm32", target_arch = "wasm64"))]
+        {
+            let _ = (name, offset, bytes);
+            Err(Error::UnsupportedTarget)
+        }
+        #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+        {
+            let name = CString::new(name).map_err(|_| Error::InvalidCString)?;
+            self.context.synchronize();
+            self.model.write_tensor_range(&name, offset, bytes)?;
+            self.context.synchronize();
+            Ok(())
+        }
+    }
+
+    /// Computes the mean absolute FP16 block scale for each logical Q1_0 row.
+    pub fn q1_0_row_scales(&mut self, name: &str) -> Result<Vec<f32>> {
+        #[cfg(any(target_arch = "wasm32", target_arch = "wasm64"))]
+        {
+            let _ = name;
+            Err(Error::UnsupportedTarget)
+        }
+        #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+        {
+            let descriptor = self.model.tensor(name)?;
+            let layout = q1_0_layout(&descriptor)?;
+            let name = CString::new(name).map_err(|_| Error::InvalidCString)?;
+            self.context.synchronize();
+            let mut scales = Vec::with_capacity(layout.rows);
+            let mut row_bytes = vec![0_u8; layout.payload_bytes];
+            for row in 0..layout.rows {
+                let offset = row
+                    .checked_mul(layout.row_stride)
+                    .ok_or(Error::UnsupportedTensorStride)?;
+                self.model
+                    .read_tensor_range(&name, offset, &mut row_bytes)?;
+                scales.push(mean_q1_0_scale(&row_bytes, layout.blocks)?);
+            }
+            Ok(scales)
+        }
+    }
+
+    /// XORs every packed binary weight in one logical Q1_0 matrix row.
+    /// Calling this method twice with the same tensor and row restores the bytes.
+    pub fn xor_q1_0_row(&mut self, name: &str, row: usize) -> Result<RowXorResult> {
+        if !self.mutable_tensors {
+            return Err(Error::TensorMutationDisabled);
+        }
+        #[cfg(any(target_arch = "wasm32", target_arch = "wasm64"))]
+        {
+            let _ = (name, row);
+            Err(Error::UnsupportedTarget)
+        }
+        #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
+        {
+            let descriptor = self.model.tensor(name)?;
+            let layout = q1_0_layout(&descriptor)?;
+            if row >= layout.rows {
+                return Err(Error::InvalidTensorRow);
+            }
+            let offset = row
+                .checked_mul(layout.row_stride)
+                .ok_or(Error::UnsupportedTensorStride)?;
+            let name = CString::new(name).map_err(|_| Error::InvalidCString)?;
+            let mut row_bytes = vec![0_u8; layout.payload_bytes];
+            self.context.synchronize();
+            self.model
+                .read_tensor_range(&name, offset, &mut row_bytes)?;
+            xor_q1_0_payload(&mut row_bytes, layout.blocks)?;
+            self.model.write_tensor_range(&name, offset, &row_bytes)?;
+            self.context.synchronize();
+            Ok(RowXorResult {
+                row,
+                blocks: layout.blocks,
+                packed_bytes_flipped: layout
+                    .blocks
+                    .checked_mul(Q1_0_PACKED_BYTES)
+                    .ok_or(Error::UnsupportedTensorShape)?,
+            })
         }
     }
 
@@ -1303,7 +1759,7 @@ impl Session {
             let n_tokens = i32::try_from(chunk.len()).map_err(|_| Error::InvalidInput)?;
             let chunk_start_pos = (chunk_index * self.n_batch) as raw::llama_pos;
             let mut batch = Batch::new(n_tokens, 0, 1);
-            fill_batch(&mut batch, chunk, chunk_start_pos, false);
+            fill_batch(&mut batch, chunk, chunk_start_pos, BatchOutput::All);
 
             let status = if self.model.has_encoder() && !self.model.has_decoder() {
                 self.context.encode(&batch)
@@ -1337,11 +1793,19 @@ impl Session {
         start_pos: raw::llama_pos,
         output_last_only: bool,
     ) -> Result<()> {
+        let chunk_count = tokens.len().div_ceil(self.n_batch);
         for (chunk_index, chunk) in tokens.chunks(self.n_batch).enumerate() {
             let n_tokens = i32::try_from(chunk.len()).map_err(|_| Error::InvalidInput)?;
             let chunk_start_pos = start_pos + (chunk_index * self.n_batch) as raw::llama_pos;
             let mut batch = Batch::new(n_tokens, 0, 1);
-            fill_batch(&mut batch, chunk, chunk_start_pos, output_last_only);
+            let output = if !output_last_only {
+                BatchOutput::All
+            } else if chunk_index + 1 == chunk_count {
+                BatchOutput::Last
+            } else {
+                BatchOutput::None
+            };
+            fill_batch(&mut batch, chunk, chunk_start_pos, output);
 
             let status = if self.model.has_encoder() && !self.model.has_decoder() {
                 self.context.encode(&batch)
@@ -1358,6 +1822,100 @@ impl Session {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Q1_0Layout {
+    rows: usize,
+    blocks: usize,
+    payload_bytes: usize,
+    row_stride: usize,
+}
+
+fn q1_0_layout(descriptor: &TensorDescriptor) -> Result<Q1_0Layout> {
+    if descriptor.type_id != Q1_0_TYPE_ID {
+        return Err(Error::UnsupportedTensorType);
+    }
+    let rows = descriptor.row_count()?;
+    let width =
+        usize::try_from(descriptor.dimensions[0]).map_err(|_| Error::UnsupportedTensorShape)?;
+    if width == 0 || width % Q1_0_BLOCK_VALUES != 0 || rows == 0 {
+        return Err(Error::UnsupportedTensorShape);
+    }
+    let blocks = width / Q1_0_BLOCK_VALUES;
+    let payload_bytes = blocks
+        .checked_mul(Q1_0_BLOCK_BYTES)
+        .ok_or(Error::UnsupportedTensorShape)?;
+    if descriptor.strides[0] != Q1_0_BLOCK_BYTES
+        || descriptor.strides[1] < payload_bytes
+        || descriptor.strides[2]
+            != descriptor.strides[1]
+                .checked_mul(rows)
+                .ok_or(Error::UnsupportedTensorStride)?
+    {
+        return Err(Error::UnsupportedTensorStride);
+    }
+    let last_end = rows
+        .checked_sub(1)
+        .and_then(|last| last.checked_mul(descriptor.strides[1]))
+        .and_then(|offset| offset.checked_add(payload_bytes))
+        .ok_or(Error::UnsupportedTensorStride)?;
+    if last_end > descriptor.nbytes {
+        return Err(Error::UnsupportedTensorStride);
+    }
+    Ok(Q1_0Layout {
+        rows,
+        blocks,
+        payload_bytes,
+        row_stride: descriptor.strides[1],
+    })
+}
+
+fn xor_q1_0_payload(bytes: &mut [u8], blocks: usize) -> Result<()> {
+    let expected = blocks
+        .checked_mul(Q1_0_BLOCK_BYTES)
+        .ok_or(Error::UnsupportedTensorShape)?;
+    if blocks == 0 || bytes.len() != expected {
+        return Err(Error::UnsupportedTensorShape);
+    }
+    for block in bytes.chunks_exact_mut(Q1_0_BLOCK_BYTES) {
+        for byte in &mut block[Q1_0_SCALE_BYTES..] {
+            *byte ^= u8::MAX;
+        }
+    }
+    Ok(())
+}
+
+fn mean_q1_0_scale(bytes: &[u8], blocks: usize) -> Result<f32> {
+    let expected = blocks
+        .checked_mul(Q1_0_BLOCK_BYTES)
+        .ok_or(Error::UnsupportedTensorShape)?;
+    if blocks == 0 || bytes.len() != expected {
+        return Err(Error::UnsupportedTensorShape);
+    }
+    let sum = bytes
+        .chunks_exact(Q1_0_BLOCK_BYTES)
+        .map(|block| f16_bits_to_f32(u16::from_le_bytes([block[0], block[1]])).abs())
+        .sum::<f32>();
+    Ok(sum / blocks as f32)
+}
+
+fn f16_bits_to_f32(bits: u16) -> f32 {
+    let sign = ((bits & 0x8000) as u32) << 16;
+    let exponent = ((bits >> 10) & 0x1f) as u32;
+    let fraction = (bits & 0x03ff) as u32;
+    let f32_bits = match exponent {
+        0 if fraction == 0 => sign,
+        0 => {
+            let shift = fraction.leading_zeros() - 21;
+            let normalized = (fraction << shift) & 0x03ff;
+            let adjusted_exponent = 113_u32 - shift;
+            sign | (adjusted_exponent << 23) | (normalized << 13)
+        }
+        0x1f => sign | 0x7f80_0000 | (fraction << 13),
+        _ => sign | ((exponent + 112) << 23) | (fraction << 13),
+    };
+    f32::from_bits(f32_bits)
 }
 
 const JINA_V3_DOC_EMBED_TOKEN_ID: raw::llama_token = 151_670;
@@ -1473,7 +2031,7 @@ fn fill_batch(
     batch: &mut Batch,
     tokens: &[raw::llama_token],
     start_pos: raw::llama_pos,
-    output_last_only: bool,
+    output: BatchOutput,
 ) {
     let raw = batch.as_raw_mut();
     raw.n_tokens = tokens.len() as i32;
@@ -1483,13 +2041,21 @@ fn fill_batch(
             *raw.pos.add(index) = start_pos + index as raw::llama_pos;
             *raw.n_seq_id.add(index) = 1;
             **raw.seq_id.add(index) = 0;
-            *raw.logits.add(index) = if !output_last_only || index + 1 == tokens.len() {
-                1
-            } else {
-                0
+            *raw.logits.add(index) = match output {
+                BatchOutput::All => 1,
+                BatchOutput::None => 0,
+                BatchOutput::Last if index + 1 == tokens.len() => 1,
+                BatchOutput::Last => 0,
             };
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BatchOutput {
+    All,
+    None,
+    Last,
 }
 
 fn push_if_token(tokens: &mut Vec<raw::llama_token>, token: raw::llama_token) {
@@ -1717,6 +2283,27 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
 mod tests {
     use super::*;
 
+    fn q1_descriptor(width: u64, rows: u64, row_padding: usize) -> TensorDescriptor {
+        let blocks = width as usize / Q1_0_BLOCK_VALUES;
+        let payload = blocks * Q1_0_BLOCK_BYTES;
+        let row_stride = payload + row_padding;
+        TensorDescriptor {
+            name: "blk.0.ffn_gate.weight".into(),
+            type_id: Q1_0_TYPE_ID,
+            type_name: "q1_0".into(),
+            dimensions: [width, rows, 1, 1],
+            strides: [
+                Q1_0_BLOCK_BYTES,
+                row_stride,
+                row_stride * rows as usize,
+                row_stride,
+            ],
+            n_dims: 2,
+            nbytes: row_stride * (rows as usize - 1) + payload,
+            backend: "CPU".into(),
+        }
+    }
+
     #[test]
     fn generation_options_default_has_no_explicit_token_cap() {
         assert_eq!(GenerationOptions::default().max_new_tokens, 0);
@@ -1733,5 +2320,84 @@ mod tests {
             AttentionOperation::Embedding
         ));
         assert!(!causal_attention_for_operation(AttentionOperation::Rerank));
+    }
+
+    #[test]
+    fn q1_0_layout_accepts_contiguous_and_padded_rows() {
+        assert_eq!(
+            q1_0_layout(&q1_descriptor(256, 3, 0)).unwrap(),
+            Q1_0Layout {
+                rows: 3,
+                blocks: 2,
+                payload_bytes: 36,
+                row_stride: 36,
+            }
+        );
+        assert_eq!(
+            q1_0_layout(&q1_descriptor(128, 2, 14)).unwrap().row_stride,
+            32
+        );
+    }
+
+    #[test]
+    fn q1_0_layout_rejects_wrong_type_shape_rows_and_stride() {
+        let mut descriptor = q1_descriptor(128, 3, 0);
+        descriptor.type_id = raw::ggml_type::Tq1_0 as i32;
+        assert_eq!(q1_0_layout(&descriptor), Err(Error::UnsupportedTensorType));
+
+        let mut descriptor = q1_descriptor(128, 3, 0);
+        descriptor.n_dims = 3;
+        assert_eq!(q1_0_layout(&descriptor), Err(Error::UnsupportedTensorShape));
+
+        let descriptor = q1_descriptor(127, 3, 0);
+        assert_eq!(q1_0_layout(&descriptor), Err(Error::UnsupportedTensorShape));
+
+        let mut descriptor = q1_descriptor(128, 3, 0);
+        descriptor.strides[1] = Q1_0_BLOCK_BYTES - 1;
+        assert_eq!(
+            q1_0_layout(&descriptor),
+            Err(Error::UnsupportedTensorStride)
+        );
+    }
+
+    #[test]
+    fn q1_0_xor_preserves_scales_flips_payload_and_is_self_inverse() {
+        let mut bytes = Vec::new();
+        for block_index in 0..3_u8 {
+            bytes.extend_from_slice(&[block_index, block_index + 1]);
+            bytes.extend((0..Q1_0_PACKED_BYTES).map(|value| value as u8 + block_index));
+        }
+        let original = bytes.clone();
+        xor_q1_0_payload(&mut bytes, 3).unwrap();
+        for block_index in 0..3 {
+            let offset = block_index * Q1_0_BLOCK_BYTES;
+            assert_eq!(
+                &bytes[offset..offset + Q1_0_SCALE_BYTES],
+                &original[offset..offset + Q1_0_SCALE_BYTES]
+            );
+            for byte_index in Q1_0_SCALE_BYTES..Q1_0_BLOCK_BYTES {
+                assert_eq!(bytes[offset + byte_index], !original[offset + byte_index]);
+            }
+        }
+        xor_q1_0_payload(&mut bytes, 3).unwrap();
+        assert_eq!(bytes, original);
+    }
+
+    #[test]
+    fn q1_0_scale_aggregation_uses_mean_absolute_fp16_scale() {
+        let mut bytes = vec![0_u8; 2 * Q1_0_BLOCK_BYTES];
+        bytes[0..2].copy_from_slice(&0x3c00_u16.to_le_bytes()); // 1.0
+        bytes[Q1_0_BLOCK_BYTES..Q1_0_BLOCK_BYTES + 2].copy_from_slice(&0xc000_u16.to_le_bytes()); // -2.0
+        assert_eq!(mean_q1_0_scale(&bytes, 2).unwrap(), 1.5);
+    }
+
+    #[test]
+    fn f16_conversion_covers_zero_subnormal_normal_infinity_and_nan() {
+        assert_eq!(f16_bits_to_f32(0), 0.0);
+        assert_eq!(f16_bits_to_f32(0x8000).to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(f16_bits_to_f32(0x3c00), 1.0);
+        assert_eq!(f16_bits_to_f32(0x0001), 2.0_f32.powi(-24));
+        assert!(f16_bits_to_f32(0x7c00).is_infinite());
+        assert!(f16_bits_to_f32(0x7e00).is_nan());
     }
 }

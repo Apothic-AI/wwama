@@ -12,6 +12,7 @@ links = "llama"
 libm = "0.2"
 
 [build-dependencies]
+cc = "1.2"
 cmake = "0.1.58"
 
 [features]
