@@ -298,3 +298,32 @@ is insufficient.
 This order keeps the highest-risk assumptions observable and prevents a large
 Bankai port from hiding an unresolved tensor-access or device-synchronization
 problem.
+
+## Implementation Results
+
+The first implementation slice and the planned validation gates are complete
+in this workspace.
+
+| Capability | Result | Evidence |
+| --- | --- | --- |
+| llama.cpp source changes | Not required | `src/bridge/wwama_tensor_bridge.cpp` uses the checked-out internal tensor map plus public GGML transfer APIs; no file under `libs/cpp/llama.cpp` changed. |
+| Native tensor inventory | Passed | The Bonsai fixture reports 399 tensors, including `blk.0.ffn_gate.weight`, `ffn_up`, and `ffn_down` as Q1_0 matrices. |
+| Bankai row orientation | Confirmed | Gate/up are `[4096, 12288]` with strides `[18, 576]`; down is `[12288, 4096]` with strides `[18, 1728]`. The logical row is GGML dimension 1. |
+| Deterministic selected logits | Passed | `Session::evaluate_selected_logits` clears memory, marks only the final position, synchronizes, and repeated evaluations match exactly. |
+| CPU Q1_0 mutation | Passed | Bonsai 8B row mutation preserves scales, changes packed bytes, and double XOR restores bytes and logits. |
+| CUDA Q1_0 mutation | Passed | Bonsai 8B with all 37 layers on an RTX 4050 passed the same transfer, scale, mutation, and restoration assertions. |
+| Vulkan Q1_0 mutation | Passed | Bonsai 8B with all 37 layers on Vulkan0 on the same RTX 4050 passed the same assertions. |
+| wasm32 build | Passed | CPU-only `wasm32-unknown-unknown` compilation passes; the bridge is excluded from wasm builds. |
+| wasm tensor mutation runtime | Deliberately unsupported | `UnsupportedTarget` is returned until a model-backed Emscripten/WebGPU fixture proves read/write visibility and synchronization. |
+
+The public mutation path is opt-in through `SessionOptions::mutable_tensors`.
+It disables read-only mmap because attempting `ggml_backend_tensor_set` on a
+`CPU_Mapped` model caused a reproducible SIGSEGV; mutable loading was then
+validated with `mmap = false` on CPU, CUDA, and Vulkan. `&mut Session` and
+explicit context synchronization serialize inference and mutation. Row XOR
+copies only one row through the backend, not the whole model, but it is not a
+zero-copy operation on device-resident tensors.
+
+The temporary Bankai-facing adapter is in `examples/miyagi_backend.rs`. It
+accepts an external `(layer, projection) -> tensor name` mapping, so
+architecture-specific Bonsai/Qwen naming remains outside `wwama` as planned.

@@ -4,11 +4,15 @@ use wwama::{Error, Session, SessionOptions};
 
 fn load_model(variable: &str, mutable_tensors: bool) -> Option<Session> {
     let path = env::var(variable).ok()?;
+    let n_gpu_layers = env::var("WWAMA_TEST_GPU_LAYERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
     let options = SessionOptions {
         n_ctx: 256,
         n_batch: 64,
         n_ubatch: 64,
-        n_gpu_layers: 0,
+        n_gpu_layers,
         mutable_tensors,
         ..SessionOptions::default()
     };
@@ -76,6 +80,8 @@ fn q1_0_model_row_xor_restores_bytes_and_logits() {
     let descriptor = session.model().tensor(&tensor_name).unwrap();
     let rows = descriptor.row_count().unwrap();
     assert!(row < rows);
+    let scales_before = session.q1_0_row_scales(&tensor_name).unwrap();
+    assert_eq!(scales_before.len(), rows);
     let row_offset = row * descriptor.strides[1];
     let row_bytes = descriptor.strides[0] * (descriptor.dimensions[0] as usize / 128);
     let before = session
@@ -88,6 +94,8 @@ fn q1_0_model_row_xor_restores_bytes_and_logits() {
         .evaluate_selected_logits(&prompt, &candidates[..2])
         .unwrap();
     session.xor_q1_0_row(&tensor_name, row).unwrap();
+    let scales_after_flip = session.q1_0_row_scales(&tensor_name).unwrap();
+    assert_eq!(scales_after_flip, scales_before);
     let mutated = session
         .read_tensor_range(&tensor_name, row_offset, row_bytes)
         .unwrap();

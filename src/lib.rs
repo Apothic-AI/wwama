@@ -11,6 +11,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ffi::CStr;
 use core::fmt;
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::slice;
@@ -520,10 +521,15 @@ pub struct RowXorResult {
     pub packed_bytes_flipped: usize,
 }
 
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
 const Q1_0_TYPE_ID: i32 = 41;
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
 const Q1_0_BLOCK_VALUES: usize = 128;
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
 const Q1_0_SCALE_BYTES: usize = 2;
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
 const Q1_0_PACKED_BYTES: usize = Q1_0_BLOCK_VALUES / 8;
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
 const Q1_0_BLOCK_BYTES: usize = Q1_0_SCALE_BYTES + Q1_0_PACKED_BYTES;
 
 #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
@@ -1824,6 +1830,7 @@ impl Session {
     }
 }
 
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Q1_0Layout {
     rows: usize,
@@ -1832,6 +1839,7 @@ struct Q1_0Layout {
     row_stride: usize,
 }
 
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
 fn q1_0_layout(descriptor: &TensorDescriptor) -> Result<Q1_0Layout> {
     if descriptor.type_id != Q1_0_TYPE_ID {
         return Err(Error::UnsupportedTensorType);
@@ -1871,6 +1879,7 @@ fn q1_0_layout(descriptor: &TensorDescriptor) -> Result<Q1_0Layout> {
     })
 }
 
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
 fn xor_q1_0_payload(bytes: &mut [u8], blocks: usize) -> Result<()> {
     let expected = blocks
         .checked_mul(Q1_0_BLOCK_BYTES)
@@ -1886,6 +1895,7 @@ fn xor_q1_0_payload(bytes: &mut [u8], blocks: usize) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
 fn mean_q1_0_scale(bytes: &[u8], blocks: usize) -> Result<f32> {
     let expected = blocks
         .checked_mul(Q1_0_BLOCK_BYTES)
@@ -1900,6 +1910,7 @@ fn mean_q1_0_scale(bytes: &[u8], blocks: usize) -> Result<f32> {
     Ok(sum / blocks as f32)
 }
 
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
 fn f16_bits_to_f32(bits: u16) -> f32 {
     let sign = ((bits & 0x8000) as u32) << 16;
     let exponent = ((bits >> 10) & 0x1f) as u32;

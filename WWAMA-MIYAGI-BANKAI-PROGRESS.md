@@ -28,6 +28,42 @@
   are an escalation only if bridge validation fails.
 - `miyagi` is currently only an empty README placeholder.
 
+## Implemented Capability
+
+- Added the native `wwama` tensor bridge without changing the llama.cpp source
+  tree. It enumerates owned tensor descriptors and performs backend-aware byte
+  reads/writes through `ggml_backend_tensor_get/set`.
+- Added `Model::tensors`, `Model::tensor`, `Session::read_tensor_range`, and
+  `Session::write_tensor_range` with owned metadata and deliberate error cases.
+- Added `Session::evaluate_selected_logits` and `Session::logit_gap` with
+  context reset, final-position output selection, token validation, context
+  overflow handling, and synchronization.
+- Added opt-in mutable loading via `SessionOptions::mutable_tensors`; ordinary
+  mmap-backed sessions reject writes instead of risking a native fault.
+- Added Q1_0 descriptor validation, FP16 scale aggregation, row-scale access,
+  stride-aware row XOR, and `RowXorResult` reporting.
+- Added pure layout/idempotence tests, fixture-gated model tests, tensor
+  inventory and adapter examples, and native feature validation.
+- Fixed the wasm CMake invocation to disable the excluded llama.cpp app target;
+  CPU-only wasm32 compilation now passes.
+
+## Validation Results
+
+- `cargo test --no-default-features --all-targets`: passed.
+- Bonsai 8B Q1_0 CPU model test: passed with 1.07 GiB fixture, including row
+  scales, packed-byte mutation, double-XOR restoration, and logits restoration.
+- Bonsai 8B Q1_0 CUDA test: passed with all 37 layers on NVIDIA GeForce RTX 4050.
+- Bonsai 8B Q1_0 Vulkan test: passed with all 37 layers on Vulkan0 on the same GPU.
+- `WWAMA_EMSDK=/home/bitnom/emsdk cargo check --no-default-features --target
+  wasm32-unknown-unknown`: passed. Mutable tensor runtime remains unsupported.
+
+## Handoff State
+
+The wwama blocker for Miyagi is resolved for native CPU, CUDA, and Vulkan
+paths. Miyagi still needs to own architecture mapping, Bankai patch format,
+probe/search policy, and behavioral evaluation. No llama.cpp source change is
+currently justified.
+
 ## Baseline Verification
 
 - `cargo fmt --check` passed.
@@ -35,5 +71,5 @@
 
 ## Next Work Item
 
-Execute Sprint 0 and Sprint 1 from the plan: verify the bridge approach and
-produce a model tensor inventory before adding mutation APIs.
+Implement the Miyagi crate against the owned wwama capability. Keep WebAssembly
+mutation behind an explicit capability check until a runtime fixture exists.

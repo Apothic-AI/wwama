@@ -324,6 +324,7 @@ fn build_wasm(llama_dir: &Path, target_arch: &str, enable_webgpu: bool) -> PathB
     configure.arg("-B");
     configure.arg(&build_dir);
     configure.arg("-DBUILD_SHARED_LIBS=OFF");
+    configure.arg("-DLLAMA_BUILD_APP=OFF");
     configure.arg("-DLLAMA_BUILD_COMMON=OFF");
     configure.arg("-DLLAMA_BUILD_TESTS=OFF");
     configure.arg("-DLLAMA_BUILD_TOOLS=OFF");
