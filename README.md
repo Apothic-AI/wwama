@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="./wwama-logo_transp.png" alt="wwama logo" width="320">
-</p>
+![wwama logo](wwama-logo_transp.png)
 
 # wwama
 
