@@ -138,6 +138,13 @@ fn main() {
                 println!("cargo:rustc-link-lib=dylib=omp");
             }
         }
+        "windows" => {
+            // ggml-cpu's Windows CPU detection uses RegOpenKeyExA/RegQueryValueExA.
+            println!("cargo:rustc-link-lib=dylib=advapi32");
+            if native_cuda_enabled {
+                emit_cuda_link_flags_windows(&dst);
+            }
+        }
         _ => {}
     }
 }
@@ -229,6 +236,26 @@ fn emit_cuda_link_flags(install_dir: &Path) {
     println!("cargo:rustc-link-lib=dylib=dl");
     println!("cargo:rustc-link-lib=dylib=rt");
     println!("cargo:rustc-link-lib=dylib=pthread");
+}
+
+fn emit_cuda_link_flags_windows(install_dir: &Path) {
+    if let Some(dir) = cuda_library_dir(install_dir) {
+        println!("cargo:rustc-link-search=native={}", dir.display());
+        // cuda_library_dir can resolve to the bare `lib` parent; the Windows
+        // import libraries (cudart.lib, ...) live in `lib\x64`.
+        let x64 = dir.join("x64");
+        if x64.exists() {
+            println!("cargo:rustc-link-search=native={}", x64.display());
+        }
+    }
+    // Windows links against the CUDA import libraries; the matching DLLs
+    // (cudart64_*.dll, cublas64_*.dll, ...) resolve from the CUDA bin dir at
+    // runtime. The *_static/culibos/dl/rt/pthread set used on Unix does not
+    // exist on Windows.
+    println!("cargo:rustc-link-lib=dylib=cudart");
+    println!("cargo:rustc-link-lib=dylib=cublas");
+    println!("cargo:rustc-link-lib=dylib=cublasLt");
+    println!("cargo:rustc-link-lib=dylib=cuda");
 }
 
 fn cuda_library_dir(install_dir: &Path) -> Option<PathBuf> {
@@ -393,8 +420,17 @@ fn find_llama_cpp_dir() -> PathBuf {
 }
 
 fn canonicalize_llama_cpp_dir(dir: PathBuf) -> PathBuf {
-    dir.canonicalize()
-        .unwrap_or_else(|err| panic!("failed to resolve llama.cpp dir {}: {err}", dir.display()))
+    let dir = dir
+        .canonicalize()
+        .unwrap_or_else(|err| panic!("failed to resolve llama.cpp dir {}: {err}", dir.display()));
+    // On Windows, canonicalize() returns \\?\-prefixed verbatim paths, which
+    // MSVC cl.exe cannot resolve in -I include directories (fatal error C1083).
+    // Strip the verbatim prefix so cc-rs and CMake receive plain drive paths.
+    let display = dir.to_string_lossy();
+    match display.strip_prefix(r"\\?\") {
+        Some(stripped) => PathBuf::from(stripped),
+        None => dir,
+    }
 }
 
 fn find_emscripten_toolchain() -> PathBuf {
