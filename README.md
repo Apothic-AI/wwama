@@ -1,4 +1,6 @@
-![wwama logo](https://github.com/Apothic-AI/wwama/blob/master/wwama-logo_transp.png?raw=true)
+<p align="center">
+  <img src="https://github.com/Apothic-AI/wwama/blob/master/wwama-logo_transp.png?raw=true" alt="wwama logo" width="320">
+</p>
 
 # wwama
 
