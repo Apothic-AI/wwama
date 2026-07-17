@@ -1,4 +1,4 @@
-![wwama logo](wwama-logo_transp.png)
+![wwama logo](https://github.com/Apothic-AI/wwama/blob/main/wwama-logo_transp.png?raw=true)
 
 # wwama
 
