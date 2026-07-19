@@ -370,11 +370,10 @@ fn find_llama_cpp_dir() -> PathBuf {
     let manifest_dir = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo"),
     );
-    // Prefer an explicit mainline checkout over a sibling `llama.cpp`, which in
-    // this workspace is the Apothic-AI fork — it trails upstream ggml and emits
-    // NaN logits for 1-bit (Q1_0) models (see WINDOWS-BUILD-REPORT.md, Bug 4).
-    // The mainline tree (`llama.cpp-mainline`, an upstream release tag) is what
-    // miyagi must build against; set WWAMA_LLAMA_CPP_DIR to override entirely.
+    // Prefer an explicit mainline checkout over a sibling `llama.cpp` when both
+    // exist. Some forks lag upstream ggml and have produced non-finite (NaN)
+    // logits on Q1_0 models; a `llama.cpp-mainline` directory name makes the
+    // intended tree obvious. WWAMA_LLAMA_CPP_DIR still overrides entirely.
     let candidates = [
         manifest_dir.join("../../cpp/llama.cpp-mainline"),
         manifest_dir.join("../llama.cpp-mainline"),
