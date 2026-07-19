@@ -425,11 +425,20 @@ fn canonicalize_llama_cpp_dir(dir: PathBuf) -> PathBuf {
         .unwrap_or_else(|err| panic!("failed to resolve llama.cpp dir {}: {err}", dir.display()));
     // On Windows, canonicalize() returns \\?\-prefixed verbatim paths, which
     // MSVC cl.exe cannot resolve in -I include directories (fatal error C1083).
-    // Strip the verbatim prefix so cc-rs and CMake receive plain drive paths.
+    // Strip the verbatim prefix carefully:
+    //   \\?\C:\foo     → C:\foo
+    //   \\?\UNC\s\share → \\s\share   (must not become relative UNC\...)
+    strip_windows_verbatim_prefix(dir)
+}
+
+fn strip_windows_verbatim_prefix(dir: PathBuf) -> PathBuf {
     let display = dir.to_string_lossy();
-    match display.strip_prefix(r"\\?\") {
-        Some(stripped) => PathBuf::from(stripped),
-        None => dir,
+    if let Some(rest) = display.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = display.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        dir
     }
 }
 
