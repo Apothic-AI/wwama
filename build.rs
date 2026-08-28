@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod build_support;
+
 fn main() {
     println!("cargo:rerun-if-env-changed=WWAMA_LLAMA_CPP_DIR");
     println!("cargo:rerun-if-env-changed=WWAMA_EMSCRIPTEN_TOOLCHAIN_FILE");
@@ -142,7 +144,7 @@ fn main() {
             // ggml-cpu's Windows CPU detection uses RegOpenKeyExA/RegQueryValueExA.
             println!("cargo:rustc-link-lib=dylib=advapi32");
             if native_cuda_enabled {
-                emit_cuda_link_flags_windows(&dst);
+                emit_cuda_link_flags_windows(&dst, &target_arch);
             }
         }
         _ => {}
@@ -238,14 +240,11 @@ fn emit_cuda_link_flags(install_dir: &Path) {
     println!("cargo:rustc-link-lib=dylib=pthread");
 }
 
-fn emit_cuda_link_flags_windows(install_dir: &Path) {
+fn emit_cuda_link_flags_windows(install_dir: &Path, target_arch: &str) {
     if let Some(dir) = cuda_library_dir(install_dir) {
         println!("cargo:rustc-link-search=native={}", dir.display());
-        // cuda_library_dir can resolve to the bare `lib` parent; the Windows
-        // import libraries (cudart.lib, ...) live in `lib\x64`.
-        let x64 = dir.join("x64");
-        if x64.exists() {
-            println!("cargo:rustc-link-search=native={}", x64.display());
+        if let Some(arch_dir) = build_support::windows_cuda_arch_lib_dir(&dir, target_arch) {
+            println!("cargo:rustc-link-search=native={}", arch_dir.display());
         }
     }
     // Windows links against the CUDA import libraries; the matching DLLs
@@ -254,7 +253,6 @@ fn emit_cuda_link_flags_windows(install_dir: &Path) {
     // exist on Windows.
     println!("cargo:rustc-link-lib=dylib=cudart");
     println!("cargo:rustc-link-lib=dylib=cublas");
-    println!("cargo:rustc-link-lib=dylib=cublasLt");
     println!("cargo:rustc-link-lib=dylib=cuda");
 }
 
@@ -428,18 +426,7 @@ fn canonicalize_llama_cpp_dir(dir: PathBuf) -> PathBuf {
     // Strip the verbatim prefix carefully:
     //   \\?\C:\foo     → C:\foo
     //   \\?\UNC\s\share → \\s\share   (must not become relative UNC\...)
-    strip_windows_verbatim_prefix(dir)
-}
-
-fn strip_windows_verbatim_prefix(dir: PathBuf) -> PathBuf {
-    let display = dir.to_string_lossy();
-    if let Some(rest) = display.strip_prefix(r"\\?\UNC\") {
-        PathBuf::from(format!(r"\\{rest}"))
-    } else if let Some(rest) = display.strip_prefix(r"\\?\") {
-        PathBuf::from(rest)
-    } else {
-        dir
-    }
+    build_support::strip_windows_verbatim_prefix(dir)
 }
 
 fn find_emscripten_toolchain() -> PathBuf {
