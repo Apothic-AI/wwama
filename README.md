@@ -83,12 +83,13 @@ By default, `wwama` expects this layout:
 apothic-monorepo/
   libs/
     cpp/
+      llama.cpp-mainline/  # preferred when present
       llama.cpp/
     rust/
       wwama/
 ```
 
-The default `build.rs` lookup first checks `../../cpp/llama.cpp` from the crate root. It also supports a sibling `../llama.cpp` checkout for standalone development. Override either layout with:
+The default `build.rs` lookup checks `llama.cpp-mainline` before `llama.cpp` in both the monorepo and standalone sibling layouts. Override either layout with:
 
 ```sh
 WWAMA_LLAMA_CPP_DIR=/path/to/llama.cpp cargo build
