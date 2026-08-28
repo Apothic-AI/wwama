@@ -1,5 +1,14 @@
 use std::path::{Path, PathBuf};
 
+pub(crate) fn llama_cpp_candidates(manifest_dir: &Path) -> [PathBuf; 4] {
+    [
+        manifest_dir.join("../../cpp/llama.cpp-mainline"),
+        manifest_dir.join("../llama.cpp-mainline"),
+        manifest_dir.join("../../cpp/llama.cpp"),
+        manifest_dir.join("../llama.cpp"),
+    ]
+}
+
 pub(crate) fn strip_windows_verbatim_prefix(dir: PathBuf) -> PathBuf {
     let display = dir.to_string_lossy();
     if let Some(rest) = display.strip_prefix(r"\\?\UNC\") {

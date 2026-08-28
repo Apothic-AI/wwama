@@ -395,10 +395,15 @@ fn find_llama_cpp_dir() -> PathBuf {
     let manifest_dir = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo"),
     );
-    let candidates = [
-        manifest_dir.join("../../cpp/llama.cpp"),
-        manifest_dir.join("../llama.cpp"),
-    ];
+    let candidates = build_support::llama_cpp_candidates(&manifest_dir);
+
+    // Watch candidate parents so adding a preferred checkout invalidates a
+    // previously cached build that used the fallback checkout.
+    for candidate in &candidates {
+        if let Some(parent) = candidate.parent() {
+            println!("cargo:rerun-if-changed={}", parent.display());
+        }
+    }
 
     for candidate in &candidates {
         if candidate.join("CMakeLists.txt").exists() && candidate.join("include/llama.h").exists() {

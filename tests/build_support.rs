@@ -4,6 +4,21 @@ mod build_support;
 use std::path::Path;
 
 #[test]
+fn prefers_mainline_candidates() {
+    let candidates = build_support::llama_cpp_candidates(Path::new("/workspace/libs/rust/wwama"));
+
+    assert_eq!(
+        candidates,
+        [
+            Path::new("/workspace/libs/rust/wwama/../../cpp/llama.cpp-mainline").to_path_buf(),
+            Path::new("/workspace/libs/rust/wwama/../llama.cpp-mainline").to_path_buf(),
+            Path::new("/workspace/libs/rust/wwama/../../cpp/llama.cpp").to_path_buf(),
+            Path::new("/workspace/libs/rust/wwama/../llama.cpp").to_path_buf(),
+        ]
+    );
+}
+
+#[test]
 fn strips_windows_verbatim_drive_and_unc_prefixes() {
     assert_eq!(
         build_support::strip_windows_verbatim_prefix(r"\\?\C:\src\llama.cpp".into()),
