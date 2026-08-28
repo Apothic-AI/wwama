@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod build_support;
+
 fn main() {
     println!("cargo:rerun-if-env-changed=WWAMA_LLAMA_CPP_DIR");
     println!("cargo:rerun-if-env-changed=WWAMA_EMSCRIPTEN_TOOLCHAIN_FILE");
@@ -138,6 +140,13 @@ fn main() {
                 println!("cargo:rustc-link-lib=dylib=omp");
             }
         }
+        "windows" => {
+            // ggml-cpu's Windows CPU detection uses RegOpenKeyExA/RegQueryValueExA.
+            println!("cargo:rustc-link-lib=dylib=advapi32");
+            if native_cuda_enabled {
+                emit_cuda_link_flags_windows(&dst, &target_arch);
+            }
+        }
         _ => {}
     }
 }
@@ -229,6 +238,22 @@ fn emit_cuda_link_flags(install_dir: &Path) {
     println!("cargo:rustc-link-lib=dylib=dl");
     println!("cargo:rustc-link-lib=dylib=rt");
     println!("cargo:rustc-link-lib=dylib=pthread");
+}
+
+fn emit_cuda_link_flags_windows(install_dir: &Path, target_arch: &str) {
+    if let Some(dir) = cuda_library_dir(install_dir) {
+        println!("cargo:rustc-link-search=native={}", dir.display());
+        if let Some(arch_dir) = build_support::windows_cuda_arch_lib_dir(&dir, target_arch) {
+            println!("cargo:rustc-link-search=native={}", arch_dir.display());
+        }
+    }
+    // Windows links against the CUDA import libraries; the matching DLLs
+    // (cudart64_*.dll, cublas64_*.dll, ...) resolve from the CUDA bin dir at
+    // runtime. The *_static/culibos/dl/rt/pthread set used on Unix does not
+    // exist on Windows.
+    println!("cargo:rustc-link-lib=dylib=cudart");
+    println!("cargo:rustc-link-lib=dylib=cublas");
+    println!("cargo:rustc-link-lib=dylib=cuda");
 }
 
 fn cuda_library_dir(install_dir: &Path) -> Option<PathBuf> {
@@ -393,8 +418,15 @@ fn find_llama_cpp_dir() -> PathBuf {
 }
 
 fn canonicalize_llama_cpp_dir(dir: PathBuf) -> PathBuf {
-    dir.canonicalize()
-        .unwrap_or_else(|err| panic!("failed to resolve llama.cpp dir {}: {err}", dir.display()))
+    let dir = dir
+        .canonicalize()
+        .unwrap_or_else(|err| panic!("failed to resolve llama.cpp dir {}: {err}", dir.display()));
+    // On Windows, canonicalize() returns \\?\-prefixed verbatim paths, which
+    // MSVC cl.exe cannot resolve in -I include directories (fatal error C1083).
+    // Strip the verbatim prefix carefully:
+    //   \\?\C:\foo     → C:\foo
+    //   \\?\UNC\s\share → \\s\share   (must not become relative UNC\...)
+    build_support::strip_windows_verbatim_prefix(dir)
 }
 
 fn find_emscripten_toolchain() -> PathBuf {
